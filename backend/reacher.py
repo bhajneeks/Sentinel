@@ -39,12 +39,13 @@ class ReacherAPIError(RuntimeError):
         self.body = body
 
 
-def _headers() -> dict[str, str]:
+def _headers(shop_id_override: str | None = None) -> dict[str, str]:
     api_key = os.environ.get("REACHER_API_KEY")
-    shop_id = os.environ.get("REACHER_SHOP_ID")
+    shop_id = shop_id_override or os.environ.get("REACHER_SHOP_ID")
     if not api_key or not shop_id:
         raise ReacherConfigError(
-            "REACHER_API_KEY and REACHER_SHOP_ID must be set in the environment."
+            "REACHER_API_KEY must be set in the environment, and either "
+            "REACHER_SHOP_ID must be set or a shop_id must be passed per-request."
         )
     return {"x-api-key": api_key, "x-shop-id": shop_id}
 
@@ -58,6 +59,7 @@ async def get_trending_videos(
     sort_by: str = "views",
     sort_order: str = "desc",
     time_range: str = "7 days",
+    shop_id: str | None = None,
 ) -> dict[str, Any]:
     """Fetch trending TikTok Shop videos matching `interest`."""
 
@@ -81,7 +83,7 @@ async def get_trending_videos(
         params["category"] = category[:100]
 
     async with httpx.AsyncClient(base_url=REACHER_BASE_URL, timeout=30.0) as client:
-        resp = await client.get(TRENDING_PATH, params=params, headers=_headers())
+        resp = await client.get(TRENDING_PATH, params=params, headers=_headers(shop_id))
 
     if resp.status_code >= 400:
         try:
@@ -93,9 +95,17 @@ async def get_trending_videos(
     return resp.json()
 
 
-async def _get(client: httpx.AsyncClient, path: str, params: dict[str, Any]) -> Any:
+async def _get(
+    client: httpx.AsyncClient,
+    path: str,
+    params: dict[str, Any],
+    *,
+    shop_id: str | None = None,
+) -> Any:
     clean = {k: v for k, v in params.items() if v is not None}
-    resp = await client.get(path, params=clean, headers=_headers())
+    # If the client already has shop headers baked in, don't override.
+    headers = None if "x-shop-id" in client.headers else _headers(shop_id)
+    resp = await client.get(path, params=clean, headers=headers)
     if resp.status_code >= 400:
         try:
             body: Any = resp.json()
@@ -134,6 +144,7 @@ async def search_products(
     subcategory: str | None = None,
     sort_by: str = "gmv28d",
     sort_order: str = "desc",
+    shop_id: str | None = None,
 ) -> dict[str, Any]:
     """Search the TikTok Shop catalog. `query` maps to Reacher's `search` param."""
     params = {
@@ -146,7 +157,7 @@ async def search_products(
         "sort_order": sort_order,
     }
     async with httpx.AsyncClient(base_url=REACHER_BASE_URL, timeout=30.0) as client:
-        return await _get(client, PRODUCTS_PATH, params)
+        return await _get(client, PRODUCTS_PATH, params, shop_id=shop_id)
 
 
 async def get_product_creators(
@@ -156,6 +167,7 @@ async def get_product_creators(
     page_size: int = 10,
     sort_by: str = "gmv28d",
     sort_order: str = "desc",
+    shop_id: str | None = None,
     client: httpx.AsyncClient | None = None,
 ) -> dict[str, Any]:
     params = {
@@ -166,9 +178,9 @@ async def get_product_creators(
     }
     path = f"{PRODUCTS_PATH}/{product_id}/creators"
     if client is not None:
-        return await _get(client, path, params)
+        return await _get(client, path, params, shop_id=shop_id)
     async with httpx.AsyncClient(base_url=REACHER_BASE_URL, timeout=30.0) as c:
-        return await _get(c, path, params)
+        return await _get(c, path, params, shop_id=shop_id)
 
 
 async def get_product_videos(
@@ -179,6 +191,7 @@ async def get_product_videos(
     sort_by: str = "views",
     sort_order: str = "desc",
     time_range: str | None = None,
+    shop_id: str | None = None,
     client: httpx.AsyncClient | None = None,
 ) -> dict[str, Any]:
     if time_range and time_range not in ALLOWED_TIME_RANGES:
@@ -192,9 +205,9 @@ async def get_product_videos(
     }
     path = f"{PRODUCTS_PATH}/{product_id}/videos"
     if client is not None:
-        return await _get(client, path, params)
+        return await _get(client, path, params, shop_id=shop_id)
     async with httpx.AsyncClient(base_url=REACHER_BASE_URL, timeout=30.0) as c:
-        return await _get(c, path, params)
+        return await _get(c, path, params, shop_id=shop_id)
 
 
 async def get_competitor_landscape(
@@ -204,6 +217,7 @@ async def get_competitor_landscape(
     creators_per_product: int = 10,
     videos_per_product: int = 10,
     time_range: str | None = "30 days",
+    shop_id: str | None = None,
 ) -> dict[str, Any]:
     """Semantic-ish "what are my competitors doing" view.
 
@@ -211,7 +225,7 @@ async def get_competitor_landscape(
     2. For each top match, concurrently fetch the top creators promoting it
        and the top videos featuring it.
     """
-    headers = _headers()  # raises early if env missing
+    headers = _headers(shop_id)  # raises early if env missing
     async with httpx.AsyncClient(
         base_url=REACHER_BASE_URL, timeout=30.0, headers=headers,
     ) as client:

@@ -16,6 +16,7 @@ load_dotenv(".env.local")
 load_dotenv()  # fallback to .env
 
 import agent  # noqa: E402  -- must come after load_dotenv()
+import campaign  # noqa: E402  -- must come after load_dotenv()
 import imessage  # noqa: E402  -- must come after load_dotenv()
 from overshoot import (  # noqa: E402  -- must come after load_dotenv()
     DEFAULT_MODEL as OVERSHOOT_DEFAULT_MODEL,
@@ -144,6 +145,10 @@ async def trending_videos(
         "7 days",
         pattern=f"^({'|'.join(ALLOWED_TIME_RANGES)})$",
     ),
+    shop_id: str | None = Query(
+        None, max_length=64,
+        description="Override REACHER_SHOP_ID for this request. Pass 'all' to aggregate.",
+    ),
 ):
     try:
         return await get_trending_videos(
@@ -154,6 +159,7 @@ async def trending_videos(
             sort_by=sort_by,
             sort_order=sort_order,
             time_range=time_range,
+            shop_id=shop_id,
         )
     except ReacherConfigError as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -222,6 +228,10 @@ async def competitors(
         pattern=f"^({'|'.join(ALLOWED_TIME_RANGES)})$",
         description="Window for product videos.",
     ),
+    shop_id: str | None = Query(
+        None, max_length=64,
+        description="Override REACHER_SHOP_ID for this request. Single id only — 'all' is rejected by Reacher on these endpoints.",
+    ),
 ):
     """For a free-text product input, return competitor products plus the
     creators and videos driving each one."""
@@ -232,6 +242,65 @@ async def competitors(
             creators_per_product=creators_per_product,
             videos_per_product=videos_per_product,
             time_range=time_range,
+            shop_id=shop_id,
+        )
+    except ReacherConfigError as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    except ReacherAPIError as e:
+        raise HTTPException(status_code=e.status, detail=e.body)
+
+
+class CampaignRequest(BaseModel):
+    brief: str = Field(
+        ...,
+        min_length=4,
+        max_length=2000,
+        description=(
+            "Free-text marketing brief, e.g. "
+            "'Make a marketing campaign for a lip gloss product'."
+        ),
+    )
+    product_id: str | None = Field(
+        default=None,
+        max_length=64,
+        description=(
+            "Optional Reacher product_id to benchmark against directly. "
+            "When set, subagent 1 skips the catalog search and pulls creators + "
+            "videos for this exact product. Useful when the LLM-extracted query "
+            "is too niche to match the TikTok Shop catalog (e.g. specialty coffee)."
+        ),
+    )
+    shop_id: str | None = Field(
+        default=None,
+        max_length=64,
+        description=(
+            "Override REACHER_SHOP_ID for this run. Pass 'all' only if not "
+            "using product_id (per-product endpoints reject 'all')."
+        ),
+    )
+
+
+@app.post("/api/marketing-campaign")
+async def marketing_campaign(req: CampaignRequest):
+    """Run the multi-subagent marketing-campaign orchestrator.
+
+    Subagents (run in parallel after product extraction):
+      1. Reacher products + creators
+      2. Reacher trending video hooks
+      3. Nozomio company context (brand overview + compressed past-campaign memory)
+
+    The synthesized campaign + a compressed memory note are saved to
+    `data/campaigns/` and `nia local sync` is fired in the background so the
+    campaign becomes part of future runs' context.
+    """
+    if not agent.is_configured():
+        raise HTTPException(
+            status_code=500,
+            detail="OPENAI_API_KEY is not set — campaign agent cannot run.",
+        )
+    try:
+        return await campaign.run_campaign_pipeline(
+            req.brief, product_id=req.product_id, shop_id=req.shop_id,
         )
     except ReacherConfigError as e:
         raise HTTPException(status_code=500, detail=str(e))
