@@ -15,10 +15,12 @@ Each platform script just defines `build_task(...)` and calls `run_scrape`.
 from __future__ import annotations
 
 import asyncio
+import json
 import os
+import re
 import sys
 import webbrowser
-from typing import Awaitable, Callable
+from typing import Any, Awaitable, Callable
 
 from dotenv import load_dotenv
 
@@ -308,6 +310,63 @@ def add_common_args(parser, *, default_profile: str = DEFAULT_PROFILE_NAME) -> N
     )
 
 
+_FENCE_RE = re.compile(r"```(?:json)?\s*(\[[\s\S]*?\])\s*```", re.IGNORECASE)
+_ARRAY_RE = re.compile(r"\[[\s\S]*\]")
+
+
+def parse_json_array(raw: str | None) -> list[dict[str, Any]]:
+    """Pull a JSON array out of a Browser-Use agent's free-form output.
+
+    Browser-Use models are inconsistent about how they emit JSON:
+      * cleanly:       `[{"a":1}]`
+      * fenced:        ```json\n[{"a":1}]\n```
+      * stringified:   "[{\"a\": 1}]"  (the whole thing wrapped in quotes)
+      * over-escaped:  [{\"a\": 1}]    (backslash-quote with no outer wrapping)
+      * mixed prose:   "Here are the items: [{...}]"
+
+    Try each strategy in order; return [] if none parse.
+    """
+    if not raw:
+        return []
+    candidates: list[str] = []
+
+    # 1. Whole string (handles the stringified case via outer json.loads).
+    candidates.append(raw)
+
+    # 2. Pulled from a ```json fenced block, if present.
+    fence = _FENCE_RE.search(raw)
+    if fence:
+        candidates.append(fence.group(1))
+
+    # 3. First substring that looks like a JSON array.
+    arr = _ARRAY_RE.search(raw)
+    if arr:
+        candidates.append(arr.group(0))
+
+    for candidate in candidates:
+        # First, try direct parse.
+        try:
+            data: Any = json.loads(candidate)
+        except json.JSONDecodeError:
+            data = None
+        # If it parsed to a string, the array was JSON-encoded as a string —
+        # parse the inner string too.
+        if isinstance(data, str):
+            try:
+                data = json.loads(data)
+            except json.JSONDecodeError:
+                data = None
+        # Last-ditch: replace literal backslash-quote with quote and retry.
+        if data is None:
+            try:
+                data = json.loads(candidate.replace('\\"', '"'))
+            except json.JSONDecodeError:
+                continue
+        if isinstance(data, list):
+            return [d for d in data if isinstance(d, dict)]
+    return []
+
+
 __all__ = [
     "DEFAULT_PROFILE_NAME",
     "TERMINAL_STATUSES",
@@ -315,6 +374,7 @@ __all__ = [
     "get_api_key",
     "get_or_create_profile_id",
     "make_client",
+    "parse_json_array",
     "resolve_profile_id",
     "run_login_session",
     "run_scrape",

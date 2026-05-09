@@ -1,6 +1,8 @@
 import asyncio
+import hmac
 import json
 import logging
+import os
 import uuid
 from collections import deque
 from contextlib import asynccontextmanager
@@ -10,7 +12,7 @@ from typing import Literal
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.interval import IntervalTrigger
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException, Query, Request
+from fastapi import FastAPI, Header, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 from sse_starlette.sse import EventSourceResponse
@@ -627,3 +629,92 @@ async def trigger_monitor():
         _active_cfg.alert_to,
         expand_if_quiet=True,
     )
+
+
+# ── Tensorlake → Photon social-pulse tick ─────────────────────────────────────
+#
+# Triggered by the Tensorlake Cron Scheduler (via an Application that POSTs
+# through ngrok). Runs the same code path as POST /api/social-insights, then
+# forwards the markdown summary to a recipient over iMessage (the Photon SDK
+# bridge that watches Messages.app on macOS).
+
+
+class SocialPulseTickRequest(BaseModel):
+    topic: str = Field(..., min_length=2, max_length=200)
+    platforms: list[str] | None = None
+    top_n: int = Field(default=3, ge=1, le=10)
+    scrolls: int = Field(default=8, ge=1, le=30)
+    recipient: str | None = Field(
+        default=None,
+        description=(
+            "iMessage handle (phone or email) to deliver the markdown to. "
+            "Falls back to TENSORLAKE_PULSE_RECIPIENT env var when unset."
+        ),
+    )
+    dry_run: bool = Field(
+        default=False,
+        description=(
+            "Skip social_insights (and Browser-Use scrapers) entirely and use a "
+            "stub markdown. Use this to smoke-test the Tensorlake → backend → "
+            "iMessage path without burning Browser-Use credits."
+        ),
+    )
+
+
+@app.post("/api/social-pulse/tick")
+async def social_pulse_tick(
+    req: SocialPulseTickRequest,
+    x_tensorlake_secret: str | None = Header(default=None, alias="X-Tensorlake-Secret"),
+):
+    expected = os.getenv("TENSORLAKE_WEBHOOK_SECRET", "")
+    if not expected:
+        raise HTTPException(status_code=500, detail="TENSORLAKE_WEBHOOK_SECRET not configured")
+    if not x_tensorlake_secret or not hmac.compare_digest(x_tensorlake_secret, expected):
+        raise HTTPException(status_code=401, detail="bad secret")
+
+    if req.dry_run:
+        ts = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        result = {
+            "platforms": req.platforms or ["twitter", "reddit", "linkedin"],
+            "insights_markdown": (
+                f"# {req.topic} — pulse (dry run)\n\n"
+                f"Tensorlake → Photon pipeline test at {ts}.\n"
+                "If you're reading this on iMessage, the loop is wired up correctly."
+            ),
+            "pulse": {"platforms": {}},
+        }
+    else:
+        if not agent.is_configured():
+            raise HTTPException(status_code=500, detail="OPENAI_API_KEY is not set — cannot summarize.")
+        try:
+            result = await social_pulse.social_insights(
+                req.topic,
+                platforms=req.platforms,
+                top_n=req.top_n,
+                scrolls=req.scrolls,
+            )
+        except RuntimeError as exc:
+            raise HTTPException(status_code=500, detail=str(exc))
+
+    recipient = req.recipient or os.getenv("TENSORLAKE_PULSE_RECIPIENT", "").strip() or None
+    sent = False
+    if recipient:
+        markdown = result.get("insights_markdown") or ""
+        if markdown.strip():
+            try:
+                sent = await imessage.send(recipient, markdown)
+            except Exception as exc:
+                logger.warning("social-pulse tick: imessage send failed: %s", exc)
+
+    return {
+        "ok": True,
+        "dry_run": req.dry_run,
+        "topic": req.topic,
+        "platforms": result.get("platforms"),
+        "items_total": sum(
+            len((p or {}).get("items") or [])
+            for p in (result.get("pulse", {}).get("platforms") or {}).values()
+        ),
+        "recipient": recipient,
+        "delivered": sent,
+    }
