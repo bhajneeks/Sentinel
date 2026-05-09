@@ -9,7 +9,7 @@ from dotenv import load_dotenv
 import httpx
 from pydantic import BaseModel
 from browser_use import Agent, Browser
-from langchain_openai import ChatOpenAI
+from browser_use.llm.models import ChatOpenAI
 
 load_dotenv(Path(__file__).parent / ".env")
 
@@ -86,18 +86,17 @@ async def _browser_scrape(
     state_file = _AUTH_DIR / f"{platform}_state.json"
     try:
         llm = ChatOpenAI(model="gpt-4o")
-        browser = Browser()
-        context_kwargs: dict = {}
-        if state_file.exists():
-            context_kwargs["storage_state"] = str(state_file)
-        browser_context = await browser.new_context(**context_kwargs)
+        browser = Browser(
+            storage_state=str(state_file) if state_file.exists() else None,
+            user_data_dir=None,
+        )
         agent = Agent(
             task=prompt,
             llm=llm,
-            browser_context=browser_context,
+            browser=browser,
             output_model_schema=_MentionList,
         )
-        result = await asyncio.wait_for(agent.run(), timeout=90)
+        result = await asyncio.wait_for(agent.run(), timeout=180)
         raw: _MentionList | None = (
             result.final_result() if hasattr(result, "final_result") else result
         )
