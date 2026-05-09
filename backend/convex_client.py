@@ -152,6 +152,69 @@ async def patch_supervised(
     await _run(client.mutation, "sessions:patchSupervised", args)
 
 
+async def log_supervisor_event(
+    *,
+    kind: str,
+    participant: str | None = None,
+    run_id: str | None = None,
+    session_id: str | None = None,
+    platform: str | None = None,
+    diagnosis: str | None = None,
+    plan: str | None = None,
+    task_before: str | None = None,
+    task_after: str | None = None,
+    energy: float | None = None,
+    restart_count: int | None = None,
+) -> str | None:
+    """Append an event to the persistent supervisor log.
+
+    `kind` is one of: spawn, hit, revive, give_up, close. All other
+    fields optional. Returns the new event id, or None on failure.
+    """
+    args: dict[str, Any] = {"kind": kind}
+    if participant is not None:
+        args["participant"] = participant
+    if run_id is not None:
+        args["runId"] = run_id
+    if session_id is not None:
+        args["sessionId"] = session_id
+    if platform is not None:
+        args["platform"] = platform
+    if diagnosis is not None:
+        args["diagnosis"] = diagnosis
+    if plan is not None:
+        args["plan"] = plan
+    if task_before is not None:
+        args["taskBefore"] = task_before[:2000]
+    if task_after is not None:
+        args["taskAfter"] = task_after[:2000]
+    if energy is not None:
+        args["energy"] = energy
+    if restart_count is not None:
+        args["restartCount"] = restart_count
+    try:
+        client = get_client()
+        return await _run(client.mutation, "supervisorEvents:log", args)
+    except Exception as exc:
+        logger.warning("log_supervisor_event failed: %s", exc)
+        return None
+
+
+async def supervisor_events_for_session(session_id: str, limit: int = 25) -> list[dict[str, Any]]:
+    """Fetch recent supervisor events for a session — used by the
+    agentic revive flow to reason over prior diagnoses + outcomes."""
+    try:
+        client = get_client()
+        return await _run(
+            client.query,
+            "supervisorEvents:bySession",
+            {"sessionId": session_id, "limit": limit},
+        )
+    except Exception as exc:
+        logger.warning("supervisor_events_for_session failed: %s", exc)
+        return []
+
+
 async def active_browser_count() -> int:
     client = get_client()
     raw = await _run(client.query, "sessions:activeBrowserCount", {})

@@ -88,6 +88,37 @@ export default defineSchema({
     .index("by_session", ["sessionId"])
     .index("by_run_ts", ["runId", "ts"]),
 
+  supervisorEvents: defineTable({
+    /** iMessage participant the event belongs to (for tab-scoped views). */
+    participant: v.optional(v.string()),
+    runId: v.optional(v.id("agentRuns")),
+    sessionId: v.optional(v.id("scraperSessions")),
+    platform: v.optional(PLATFORM),
+    /** What happened. */
+    kind: v.union(
+      v.literal("spawn"),
+      v.literal("hit"),
+      v.literal("revive"),
+      v.literal("give_up"),
+      v.literal("close"),
+    ),
+    /** LLM-generated explanation for revive/give_up; spawn/close use a brief
+     * human-readable text. */
+    diagnosis: v.optional(v.string()),
+    /** LLM-generated rationale for the chosen revive strategy. */
+    plan: v.optional(v.string()),
+    /** Snapshot of the task text before/after a revive. */
+    taskBefore: v.optional(v.string()),
+    taskAfter: v.optional(v.string()),
+    /** Energy at the moment of the event. */
+    energy: v.optional(v.number()),
+    restartCount: v.optional(v.number()),
+    ts: v.number(),
+  })
+    .index("by_session_ts", ["sessionId", "ts"])
+    .index("by_participant_ts", ["participant", "ts"])
+    .index("by_run_ts", ["runId", "ts"]),
+
   mentions: defineTable({
     sessionId: v.id("scraperSessions"),
     runId: v.id("agentRuns"),

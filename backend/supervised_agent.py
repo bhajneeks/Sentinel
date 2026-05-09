@@ -276,95 +276,221 @@ async def _maybe_write_energy(handle: AgentHandle) -> None:
         logger.debug("energy write failed: %s", exc)
 
 
-_REVIVE_SYSTEM = (
-    "You are a self-healing supervisor for a stuck browser agent. Read "
-    "the recent step trace and propose a NEW task instruction that gets "
-    "the agent unstuck. Respond with valid JSON only."
+_DIAGNOSE_SYSTEM = (
+    "You are diagnosing a stuck browser agent. Read the recent step trace "
+    "AND the supervisor's prior decisions on this same session. Identify "
+    "the primary cause and any pattern across prior revives. Respond with "
+    "valid JSON only."
+)
+_PLAN_SYSTEM = (
+    "You are planning a recovery for a stuck browser agent. Given the "
+    "diagnosis and prior failed strategies, decide whether to attempt "
+    "another revive or give up. If continuing, propose a NEW task that "
+    "addresses the diagnosis specifically — do not repeat strategies that "
+    "failed before. Respond with valid JSON only."
 )
 
 
-def _revive_prompt(handle: AgentHandle, recent_steps: list[Any]) -> str:
-    trace_lines: list[str] = []
+def _format_trace(recent_steps: list[Any]) -> str:
+    lines: list[str] = []
     for s in recent_steps:
-        trace_lines.append(
+        lines.append(
             f"step {getattr(s, 'number', '?')}: "
             f"url={(getattr(s, 'url', '') or '')[:140]} | "
             f"eval={(getattr(s, 'evaluation_previous_goal', '') or '')[:200]} | "
             f"next={(getattr(s, 'next_goal', '') or '')[:200]}"
         )
-    trace = "\n".join(trace_lines) or "(no recent steps recorded)"
+    return "\n".join(lines) or "(no recent steps recorded)"
+
+
+def _format_history(events: list[dict[str, Any]]) -> str:
+    """Compact reverse-chronological list of prior supervisor decisions."""
+    if not events:
+        return "(no prior events for this session)"
+    lines: list[str] = []
+    # events come in desc order; format newest-first but readable
+    for e in events[:10]:
+        kind = e.get("kind", "?")
+        diagnosis = (e.get("diagnosis") or "").strip()
+        plan = (e.get("plan") or "").strip()
+        rc = e.get("restartCount")
+        bits = [f"[{kind}"]
+        if rc is not None:
+            bits.append(f" r{rc}")
+        bits.append("]")
+        if diagnosis:
+            bits.append(f" diagnosis: {diagnosis[:200]}")
+        if plan:
+            bits.append(f" plan: {plan[:200]}")
+        lines.append("".join(bits))
+    return "\n".join(lines)
+
+
+def _diagnose_prompt(
+    handle: AgentHandle,
+    recent_steps: list[Any],
+    prior_events: list[dict[str, Any]],
+) -> str:
     return (
         f"Platform: {handle.platform}\n"
-        f"Company being tracked: {handle.company}\n"
+        f"Company: {handle.company}\n"
+        f"Energy: {handle.energy:.0f} / {ENERGY_MAX:.0f}\n"
         f"Restart attempt #{handle.restart_count + 1} of {MAX_RESTARTS}.\n\n"
-        f"Current task (truncated to 700 chars):\n{handle.current_task_text[:700]}\n\n"
-        f"Recent step trace (oldest first):\n{trace}\n\n"
-        "Diagnose what went wrong and propose a NEW task instruction. "
-        "Requirements for the new task:\n"
-        f" - Continues monitoring '{handle.company}' on {handle.platform}.\n"
-        " - Avoids the failure mode (different start URL if stuck on captcha; "
-        "different scroll mechanic if loop-stuck; different selector strategy "
-        "if elements not found).\n"
-        " - PRESERVES the FOUND format requirement: agent must emit\n"
-        "       FOUND | <full_post_url> | <author> | <one-sentence opinion summary>\n"
-        "   one line per qualifying post.\n"
-        " - Keeps the quality bar: only opinion-bearing posts explicitly "
-        "about the company.\n\n"
+        f"Current task (first 700 chars):\n{handle.current_task_text[:700]}\n\n"
+        f"Recent step trace (oldest first):\n{_format_trace(recent_steps)}\n\n"
+        f"Prior supervisor decisions on THIS session (newest first):\n"
+        f"{_format_history(prior_events)}\n\n"
         "Respond with valid JSON:\n"
-        '  {"diagnosis": "<one-sentence diagnosis of why energy hit zero>", '
-        '"new_task": "<the full new task instruction, plain text>"}\n'
-        "JSON object only, no prose."
+        '  {\n'
+        '    "primary_cause": "<the main reason the agent stalled — e.g.'
+        ' \'login wall on linkedin\', \'tiktok comments lazy-load timeout\','
+        ' \'agent looping on dismiss-popup with no progress\'>",\n'
+        '    "evidence": "<one short sentence quoting concrete signals'
+        " from the trace (urls, eval text, repeated next_goals)>\",\n"
+        '    "pattern": "<if this matches a prior revive\'s diagnosis,'
+        " name the pattern (e.g. \\\"same captcha as r1\\\"); else"
+        " null>\",\n"
+        '    "is_recoverable": true | false\n'
+        '  }\n'
+        "JSON object only."
     )
+
+
+def _plan_prompt(
+    handle: AgentHandle,
+    diagnosis: dict[str, Any],
+    prior_events: list[dict[str, Any]],
+) -> str:
+    prior_strategies = []
+    for e in prior_events[:5]:
+        if e.get("kind") == "revive" and e.get("plan"):
+            prior_strategies.append(f"- {e.get('plan', '')[:240]}")
+    prior_block = (
+        "\n".join(prior_strategies) if prior_strategies else "(no prior revive strategies)"
+    )
+    return (
+        f"Platform: {handle.platform}\n"
+        f"Company: {handle.company}\n"
+        f"Restart attempt #{handle.restart_count + 1} of {MAX_RESTARTS} "
+        f"(if you give_up, the session will close immediately).\n\n"
+        f"Diagnosis from step 1:\n{json.dumps(diagnosis, indent=2)}\n\n"
+        f"Strategies tried in prior revives on this session:\n{prior_block}\n\n"
+        f"Current task (first 600 chars):\n{handle.current_task_text[:600]}\n\n"
+        "Decide:\n"
+        " - If diagnosis.is_recoverable is false OR the pattern field shows "
+        "we are repeating a failed strategy, set decide=\"give_up\".\n"
+        " - Otherwise, set decide=\"revive\" and author a NEW task that "
+        "directly addresses primary_cause. Do NOT repeat any of the prior "
+        "strategies above verbatim. Vary the approach: different start URL, "
+        "different scroll mechanism, different popup-dismissal strategy, or "
+        "different content target on the same platform.\n\n"
+        "Constraints on new_task (only required when decide=\"revive\"):\n"
+        f" - Continues monitoring '{handle.company}' on {handle.platform}.\n"
+        " - PRESERVES the FOUND emit format:\n"
+        "       FOUND | <full_post_permalink_url> | <author> | <one-sentence opinion summary>\n"
+        " - Keeps the quality bar: only opinion-bearing posts EXPLICITLY about "
+        "the company.\n\n"
+        "Respond with valid JSON:\n"
+        '  {\n'
+        '    "decide": "revive" | "give_up",\n'
+        '    "reasoning": "<one-sentence justification, naming the strategy '
+        'change>",\n'
+        '    "strategy_name": "<short label for the strategy, e.g. \\"hashtag-feed-pivot\\", \\"reload-and-wait-longer\\", \\"comments-only-skim\\">",\n'
+        '    "new_task": "<full new task instruction, plain text — only required when decide=\\"revive\\">"\n'
+        '  }\n'
+        "JSON object only."
+    )
+
+
+async def _agent_chat_json(system: str, user: str, max_tokens: int = 700) -> dict[str, Any] | None:
+    try:
+        import agent
+        if not agent.is_configured():
+            return None
+        raw = await agent.chat_completion(
+            messages=[
+                {"role": "system", "content": system},
+                {"role": "user", "content": user},
+            ],
+            max_tokens=max_tokens,
+            temperature=0.4,
+            response_format={"type": "json_object"},
+        )
+    except Exception as exc:
+        logger.warning("agentic revive LLM call failed: %s", exc)
+        return None
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError:
+        logger.warning("agentic revive returned non-JSON: %s", raw[:200])
+        return None
 
 
 async def _diagnose_and_revive(handle: AgentHandle, recent_steps: list[Any]) -> bool:
-    """LLM diagnoses the stuck agent and queues a revised task on the same
-    session. Returns True if revive succeeded, False if we gave up."""
+    """Two-step agentic revive:
+      step 1: diagnose primary cause + look for patterns vs prior revives
+      step 2: plan — give_up or propose a NEW strategy not tried before
+    Logs the full reasoning to supervisorEvents either way.
+    Returns True if revive succeeded, False if we gave up (or LLM unavailable).
+    """
+    # Hard cap before any LLM work.
     if handle.restart_count >= MAX_RESTARTS:
-        logger.warning(
-            "supervised %s exhausted restarts (%d) — closing",
-            handle.platform, handle.restart_count,
-        )
-        try:
-            await cx.patch_supervised(
-                handle.convex_session_id,
-                energy=0,
-                last_diagnosis="max restarts exhausted",
-            )
-        except Exception:
-            pass
-        try:
-            await _close_handle(handle)
-        finally:
-            _registry.get(handle.participant, {}).pop(handle.platform, None)  # type: ignore[arg-type]
+        await _give_up(handle, reason="max restarts exhausted")
         return False
 
-    diagnosis = "stuck (default)"
-    new_task = handle.current_task_text  # fallback: rerun the same task
-    try:
-        import agent
-        if agent.is_configured():
-            raw = await agent.chat_completion(
-                messages=[
-                    {"role": "system", "content": _REVIVE_SYSTEM},
-                    {"role": "user", "content": _revive_prompt(handle, recent_steps)},
-                ],
-                max_tokens=900,
-                temperature=0.4,
-                response_format={"type": "json_object"},
-            )
-            parsed = json.loads(raw)
-            diagnosis = (parsed.get("diagnosis") or diagnosis).strip()
-            candidate = (parsed.get("new_task") or "").strip()
-            if candidate:
-                new_task = candidate
-    except Exception as exc:
-        logger.warning("revive LLM failed for %s: %s", handle.platform, exc)
+    # Pull prior events on this session — what's the agent already learned?
+    prior_events = await cx.supervisor_events_for_session(
+        handle.convex_session_id, limit=25,
+    )
+
+    # ── step 1: diagnose ────────────────────────────────────────────────
+    diagnosis = await _agent_chat_json(
+        _DIAGNOSE_SYSTEM,
+        _diagnose_prompt(handle, recent_steps, prior_events),
+        max_tokens=400,
+    )
+    if not diagnosis:
+        # If the LLM is unavailable, fall back to a single retry of the
+        # current task with cleared loop state.
+        diagnosis = {
+            "primary_cause": "unknown — LLM unavailable",
+            "evidence": "",
+            "pattern": None,
+            "is_recoverable": True,
+        }
+
+    # ── step 2: plan ─────────────────────────────────────────────────────
+    plan = await _agent_chat_json(
+        _PLAN_SYSTEM,
+        _plan_prompt(handle, diagnosis, prior_events),
+        max_tokens=900,
+    )
+    if not plan:
+        plan = {
+            "decide": "revive",
+            "reasoning": "LLM unavailable — retrying current task with cleared loop state",
+            "strategy_name": "fallback-retry",
+            "new_task": handle.current_task_text,
+        }
+
+    decide = (plan.get("decide") or "").strip().lower()
+    new_task = (plan.get("new_task") or "").strip() or handle.current_task_text
+    diagnosis_text = diagnosis.get("primary_cause") or "stuck"
+    plan_text = (
+        f"[{plan.get('strategy_name', 'unnamed')}] "
+        f"{plan.get('reasoning', '')}".strip()
+    )
+
+    if decide == "give_up":
+        await _give_up(handle, reason=diagnosis_text, plan=plan_text)
+        return False
 
     logger.info(
-        "supervised revive %s (attempt %d): %s",
-        handle.platform, handle.restart_count + 1, diagnosis,
+        "supervised revive %s (attempt %d): %s — %s",
+        handle.platform, handle.restart_count + 1, diagnosis_text, plan_text,
     )
+
+    task_before = handle.current_task_text
 
     client = make_client()
     try:
@@ -379,6 +505,7 @@ async def _diagnose_and_revive(handle: AgentHandle, recent_steps: list[Any]) -> 
         )
     except Exception as exc:
         logger.warning("revive create_task failed for %s: %s", handle.platform, exc)
+        await _give_up(handle, reason=f"revive create_task failed: {exc}")
         return False
 
     handle.current_task_id = task_resp.id
@@ -387,20 +514,71 @@ async def _diagnose_and_revive(handle: AgentHandle, recent_steps: list[Any]) -> 
     handle.recent_next_goals.clear()
     handle.energy = ENERGY_MAX
     handle.restart_count += 1
-    handle.last_energy_write_at = 0.0  # force immediate energy write below
+    handle.last_energy_write_at = 0.0
 
     try:
         await cx.patch_supervised(
             handle.convex_session_id,
             energy=handle.energy,
             restart_count=handle.restart_count,
-            last_diagnosis=diagnosis,
+            last_diagnosis=diagnosis_text,
         )
         await cx.update_session_query(handle.convex_session_id, new_task[:200])
     except Exception as exc:
         logger.debug("revive convex patch failed: %s", exc)
 
+    # Persistent log entry — captures full reasoning so the next revive
+    # can see exactly what was tried and why.
+    await cx.log_supervisor_event(
+        kind="revive",
+        participant=handle.participant,
+        run_id=handle.run_id,
+        session_id=handle.convex_session_id,
+        platform=handle.platform,
+        diagnosis=diagnosis_text,
+        plan=plan_text,
+        task_before=task_before,
+        task_after=new_task,
+        energy=handle.energy,
+        restart_count=handle.restart_count,
+    )
+
     return True
+
+
+async def _give_up(
+    handle: AgentHandle,
+    *,
+    reason: str,
+    plan: str | None = None,
+) -> None:
+    logger.warning(
+        "supervised %s giving up after %d restart(s): %s",
+        handle.platform, handle.restart_count, reason,
+    )
+    try:
+        await cx.patch_supervised(
+            handle.convex_session_id,
+            energy=0,
+            last_diagnosis=reason[:500],
+        )
+    except Exception:
+        pass
+    await cx.log_supervisor_event(
+        kind="give_up",
+        participant=handle.participant,
+        run_id=handle.run_id,
+        session_id=handle.convex_session_id,
+        platform=handle.platform,
+        diagnosis=reason,
+        plan=plan,
+        energy=0,
+        restart_count=handle.restart_count,
+    )
+    try:
+        await _close_handle(handle)
+    finally:
+        _registry.get(handle.participant, {}).pop(handle.platform, None)  # type: ignore[arg-type]
 
 
 async def _harvest_loop(handle: AgentHandle, interval: float = HARVEST_INTERVAL_S) -> None:
@@ -482,6 +660,18 @@ async def _harvest_loop(handle: AgentHandle, interval: float = HARVEST_INTERVAL_
                     handle.seen_post_urls.add(url)
                     ticked_anything_useful = True
                     handle.energy = ENERGY_REFILL_ON_HIT  # full reset on a real hit
+
+                    # Persistent log: real win — refilled energy + writing to mentions.
+                    await cx.log_supervisor_event(
+                        kind="hit",
+                        participant=handle.participant,
+                        run_id=handle.run_id,
+                        session_id=handle.convex_session_id,
+                        platform=handle.platform,
+                        diagnosis=f"insight: {insight}"[:500],
+                        energy=handle.energy,
+                        restart_count=handle.restart_count,
+                    )
 
                     if handle.run_id:
                         try:
@@ -822,6 +1012,19 @@ async def _start_one(
     except Exception:
         pass
 
+    # Persistent log: birth event.
+    await cx.log_supervisor_event(
+        kind="spawn",
+        participant=participant,
+        run_id=run_id,
+        session_id=convex_id,
+        platform=platform,
+        diagnosis=f"spawned for company '{company}'",
+        task_after=task_text,
+        energy=handle.energy,
+        restart_count=0,
+    )
+
     if start_harvester:
         handle.harvest_task = asyncio.create_task(_harvest_loop(handle))
     return handle
@@ -1088,6 +1291,19 @@ async def _close_handle(handle: AgentHandle) -> None:
         await cx.finish_session(handle.convex_session_id, "complete")
     except Exception as exc:
         logger.warning("convex finish failed: %s", exc)
+    # Persistent log: closure event. Best-effort.
+    try:
+        await cx.log_supervisor_event(
+            kind="close",
+            participant=handle.participant,
+            run_id=handle.run_id,
+            session_id=handle.convex_session_id,
+            platform=handle.platform,
+            energy=handle.energy,
+            restart_count=handle.restart_count,
+        )
+    except Exception:
+        pass
 
 
 # ── Janitor ───────────────────────────────────────────────────────────────────
