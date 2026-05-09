@@ -151,14 +151,18 @@ function _energyColor(energy: number): string {
 }
 
 /**
- * Energy bar rendered as 3D meshes inside every BrowserChrome — track + fill
- * plane that scales with energy. Renders unconditionally:
- *   - active session w/ energy   → colored fill + numeric label
+ * Energy bar — rendered as an HTML overlay floating ABOVE every BrowserChrome,
+ * not inside the chrome interior. The live-stream iframe occupies the entire
+ * screen-panel area and renders in CSS3D, which visually covers anything
+ * positioned beneath it. Putting the bar above the chrome's title bar means
+ * it's always visible regardless of iframe size, camera angle, or occlusion.
+ *
+ * States:
+ *   - active session w/ energy   → colored fill + numeric percentage
  *   - active session, energy null → amber 50% + "warming up"
  *   - no session (idle slot)      → muted track only + "idle"
- * Always visible because it's part of the chrome's billboard group.
  */
-function EnergyBar3D({
+function EnergyBarOverlay({
   energy,
   restartCount,
   isLive,
@@ -167,21 +171,13 @@ function EnergyBar3D({
   restartCount: number;
   isLive: boolean;
 }) {
-  // Bar sits along the bottom edge of the chrome. Body spans y=±0.625;
-  // screen panel ends at y=-0.585. Y=-0.605 puts the bar just below the
-  // screen with ~0.02 margin from the body bottom.
-  const TRACK_W = 1.8;
-  const TRACK_H = 0.045;
-  const Y = -0.605;
-  const Z = 0.04;
-
   let ratio: number;
   let color: string;
   let label: string;
 
   if (!isLive) {
     ratio = 0;
-    color = "#3f3a5c";
+    color = "#6b7280";
     label = "idle";
   } else if (energy === null) {
     ratio = 0.5;
@@ -195,53 +191,33 @@ function EnergyBar3D({
   }
 
   return (
-    <group>
-      {/* glow halo behind (visible only when live so idle chrome stays calm) */}
-      {isLive && (
-        <mesh position={[0, Y, Z - 0.001]}>
-          <planeGeometry args={[TRACK_W + 0.08, TRACK_H + 0.06]} />
-          <meshBasicMaterial color={color} transparent opacity={0.22} />
-        </mesh>
-      )}
-      {/* track */}
-      <mesh position={[0, Y, Z]}>
-        <planeGeometry args={[TRACK_W, TRACK_H]} />
-        <meshBasicMaterial
-          color={isLive ? "#15132a" : "#1a1530"}
-          transparent
-          opacity={0.9}
-        />
-      </mesh>
-      {/* fill — scaled width, anchored to left edge */}
-      {ratio > 0 && (
-        <mesh
-          position={[-(TRACK_W / 2) + (TRACK_W * ratio) / 2, Y, Z + 0.001]}
-          scale={[Math.max(ratio, 0.001), 1, 1]}
-        >
-          <planeGeometry args={[TRACK_W, TRACK_H]} />
-          <meshBasicMaterial color={color} />
-        </mesh>
-      )}
-      {/* numeric / status label */}
-      <Html
-        center
-        distanceFactor={2.6}
-        position={[0, Y - 0.085, Z + 0.005]}
-        occlude={false}
+    <Html
+      center
+      distanceFactor={3.2}
+      position={[0, 0.86, 0.05]}
+      occlude={false}
+      zIndexRange={[100000, 100000]}
+    >
+      <div
+        className="pointer-events-none flex w-[180px] flex-col items-stretch gap-1"
+        style={{ filter: isLive ? `drop-shadow(0 0 8px ${color}66)` : undefined }}
       >
-        <div
-          className="pointer-events-none flex items-center gap-1.5 whitespace-nowrap font-mono text-[11px] font-semibold tracking-wider uppercase"
-          style={{ color }}
-        >
-          <span>{label}</span>
+        <div className="flex items-center justify-between font-mono text-[10px] font-semibold tracking-[0.2em] uppercase">
+          <span style={{ color }}>{label}</span>
           {restartCount > 0 ? (
-            <span className="rounded-full bg-violet-500/25 px-1.5 py-[1px] text-violet-200 text-[9px] ring-1 ring-violet-400/40">
+            <span className="rounded-full bg-violet-500/30 px-1.5 py-[1px] text-violet-100 text-[8px] ring-1 ring-violet-400/40">
               ×{restartCount}
             </span>
           ) : null}
         </div>
-      </Html>
-    </group>
+        <div className="h-1.5 w-full overflow-hidden rounded-full bg-black/60 ring-1 ring-white/10">
+          <div
+            className="h-full transition-[width] duration-500"
+            style={{ width: `${ratio * 100}%`, background: color }}
+          />
+        </div>
+      </div>
+    </Html>
   );
 }
 
@@ -418,7 +394,7 @@ function BrowserChrome({
       )}
 
       {live && <LiveScreen liveUrl={live.liveUrl} platform={platform} query={live.query} />}
-      <EnergyBar3D
+      <EnergyBarOverlay
         isLive={!!live}
         energy={live && typeof live.energy === "number" ? live.energy : null}
         restartCount={live?.restartCount ?? 0}

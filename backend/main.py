@@ -7,7 +7,7 @@ import uuid
 from collections import deque
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
-from typing import Literal
+from typing import Any, Literal
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.interval import IntervalTrigger
@@ -523,15 +523,42 @@ def reopen_conversation(participant: str):
 
 
 @app.post("/api/agents/{participant}/stop")
-async def stop_agents(participant: str) -> dict[str, int]:
-    """Stop every supervised browser agent associated with this participant.
+async def stop_agents(participant: str) -> dict[str, Any]:
+    """Stop every supervised browser agent associated with this participant
+    AND wipe all conversation state for that participant.
 
-    Closes the BU cloud sessions (so we stop billing) and marks the
-    Convex rows complete so the dashboard removes them. Idempotent.
+    Stopping the browsers also:
+      - drops every stored message for the participant from the in-memory
+        deque (the chat thread on the dashboard goes blank)
+      - adds the participant to `closed_participants` so future inbound
+        messages from the same number are rejected (matches /close behaviour)
+      - clears the active tracking run + active company in tools so Rachel
+        no longer "remembers" what she was tracking for them
+
+    Idempotent.
     """
     import supervised_agent
+    import tools as _tools
+
     closed = await supervised_agent.close_all_for_participant(participant)
-    return {"stopped": closed}
+
+    # Wipe message history for this participant.
+    closed_participants.add(participant)
+    survivors = [m for m in messages if m.participant != participant]
+    messages_count_before = len(messages)
+    messages.clear()
+    messages.extend(survivors)
+    purged = messages_count_before - len(survivors)
+
+    # Drop tracking-pipeline state in tools.
+    _tools._active_run_by_participant.pop(participant, None)
+    _tools._active_company_by_participant.pop(participant, None)
+
+    return {
+        "stopped": closed,
+        "messagesPurged": purged,
+        "contextCleared": True,
+    }
 
 
 def _derive_participant(message: Message) -> str | None:
