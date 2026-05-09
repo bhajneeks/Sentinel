@@ -404,8 +404,8 @@ function SceneOverlayLive() {
   const liveCount = sessions.length;
   const summary =
     liveCount === 0
-      ? "3 browsers · idle"
-      : `${liveCount} live · ${3 - Math.min(liveCount, 3)} idle`;
+      ? "4 browsers · idle"
+      : `${liveCount} live · ${4 - Math.min(liveCount, 4)} idle`;
   return (
     <div className="pointer-events-none absolute inset-0 flex flex-col justify-between p-4">
       <div className="flex items-center justify-between">
@@ -430,6 +430,7 @@ function SceneOverlayLive() {
           <Legend dot="#ff4500" label="Reddit" />
           <Legend dot="#e2e8f0" label="X" />
           <Legend dot="#0a66c2" label="LinkedIn" />
+          <Legend dot="#ff0050" label="TikTok" />
         </div>
         <div className="text-zinc-600">drag to rotate</div>
       </div>

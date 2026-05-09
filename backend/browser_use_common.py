@@ -28,7 +28,7 @@ load_dotenv()
 
 logger = logging.getLogger("browser_use_common")
 
-ConvexPlatform = Literal["reddit", "x", "linkedin"]
+ConvexPlatform = Literal["reddit", "x", "linkedin", "tiktok"]
 
 # Windows consoles default to cp1252 and crash on emoji in agent output.
 for _stream in (sys.stdout, sys.stderr):

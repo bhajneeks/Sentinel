@@ -5,6 +5,7 @@ export const PLATFORM = v.union(
   v.literal("reddit"),
   v.literal("x"),
   v.literal("linkedin"),
+  v.literal("tiktok"),
 );
 
 export const RUN_STATUS = v.union(

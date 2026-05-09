@@ -36,7 +36,7 @@ const PLATFORMS: Platform[] = [
     initial: "𝕏",
     color: "#ffffff",
     emissive: "#cbd5e1",
-    position: [0, -1.4, 1.6],
+    position: [0, -1.6, 1.8],
     phase: 1.7,
   },
   {
@@ -48,6 +48,16 @@ const PLATFORMS: Platform[] = [
     emissive: "#3b82f6",
     position: [3.6, 0.6, 0.3],
     phase: 3.4,
+  },
+  {
+    id: "tiktok",
+    label: "TikTok",
+    url: "tiktok.com",
+    initial: "♪",
+    color: "#ff0050",
+    emissive: "#00f2ea",
+    position: [0, 1.9, -1.5],
+    phase: 5.1,
   },
 ];
 
