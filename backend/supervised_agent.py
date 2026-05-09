@@ -23,12 +23,15 @@ or `"<platform>@<n>"` for an orbit (`linkedin@2`, `linkedin@3`, ...).
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 import re
 import time
 import urllib.parse
+import uuid
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from typing import Any, Iterable
 
 import convex_client as cx
@@ -65,6 +68,7 @@ class AgentHandle:
     company: str = ""
     last_step_seen: int = 0
     seen_post_urls: set[str] = field(default_factory=set)
+    rejected_post_urls: set[str] = field(default_factory=set)
     harvest_task: asyncio.Task[None] | None = None
 
     def touch(self) -> None:
@@ -98,6 +102,116 @@ def _is_relevant(haystack: str, company: str) -> bool:
     return company.lower() in haystack.lower()
 
 
+_JUDGE_SYSTEM = (
+    "You are filtering social media posts for QUALITY + RELEVANCE. You are "
+    "extremely strict. Most posts SHOULD be rejected. Respond with valid "
+    "JSON only — no prose, no markdown."
+)
+
+
+def _judge_prompt(company: str, platform: str, url: str, author: str, raw_summary: str) -> str:
+    return (
+        f"Company being tracked: {company}\n"
+        f"Platform: {platform}\n"
+        f"Post URL: {url}\n"
+        f"Author: {author}\n"
+        f"Watcher agent summary: {raw_summary}\n\n"
+        "Decide:\n"
+        f"1) Is this post EXPLICITLY about {company}? The company (or its "
+        "products / public people) must be the SUBJECT of the post — not "
+        "a tangential mention, not an item in a 'top N AI companies' "
+        "listicle, not a job/career post, not generic AI-industry chatter.\n"
+        "2) Does it contain SUBSTANTIVE opinion, sentiment, criticism, "
+        "praise, or concern from the author or commenters? Pure news "
+        "announcements / press releases / promo / FYI links FAIL this test.\n\n"
+        "If BOTH yes, respond:\n"
+        '  {"relevant": true, "insight": "<one-sentence lowercase casual '
+        'summary of WHAT PEOPLE THINK/FEEL about the company, 8-22 words. '
+        'Examples: \'ppl genuinely worried about the new privacy policy\', '
+        "'engineers raving about claude 4 — calling it the new SOTA', "
+        "'lots of complaints about the pricing tier change'>\"}\n\n"
+        "If EITHER no, respond:\n"
+        '  {"relevant": false, "insight": null}\n\n'
+        "JSON object only."
+    )
+
+
+async def _judge_post(
+    company: str, platform: str, url: str, author: str, raw_summary: str
+) -> dict[str, Any] | None:
+    """LLM second-pass: relevance + opinion summary. Returns parsed JSON
+    `{relevant: bool, insight: str | None}` or None on failure."""
+    try:
+        import agent  # local import — keeps supervised_agent usable standalone
+
+        if not agent.is_configured():
+            return None
+        raw = await agent.chat_completion(
+            messages=[
+                {"role": "system", "content": _JUDGE_SYSTEM},
+                {"role": "user", "content": _judge_prompt(company, platform, url, author, raw_summary)},
+            ],
+            max_tokens=160,
+            temperature=0.2,
+            response_format={"type": "json_object"},
+        )
+    except Exception as exc:
+        logger.warning("judge call failed: %s", exc)
+        return None
+
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError:
+        logger.warning("judge returned non-JSON: %s", raw[:200])
+        return None
+
+
+async def _push_insight(
+    participant: str,
+    platform: str,
+    insight: str,
+    url: str,
+) -> None:
+    """Send Rachel-style fragments to iMessage AND echo into the dashboard
+    chat thread so the user sees the insight in both places."""
+    text = f"found this on {platform} || {insight} || {url}"
+    fragments = [p.strip() for p in text.split("||") if p.strip()]
+
+    # Lazy imports to avoid circular (main → tools → supervised_agent → main).
+    try:
+        import imessage
+    except Exception:
+        imessage = None  # type: ignore[assignment]
+    try:
+        import main as _main
+    except Exception:
+        _main = None  # type: ignore[assignment]
+
+    for fragment in fragments:
+        if imessage is not None:
+            try:
+                await imessage.send(participant, fragment, "iMessage")
+            except Exception as exc:
+                logger.warning("imessage send failed: %s", exc)
+
+        if _main is not None:
+            try:
+                msg = _main.Message(
+                    id=f"agent-{uuid.uuid4().hex[:12]}",
+                    text=fragment,
+                    participant=participant,
+                    chatId=None,
+                    chatKind="dm",
+                    service="iMessage",
+                    createdAt=datetime.now(timezone.utc),
+                    direction="outbound",
+                )
+                _main.messages.append(msg)
+                _main.broadcast(msg)
+            except Exception as exc:
+                logger.warning("dashboard echo failed: %s", exc)
+
+
 async def _harvest_loop(handle: AgentHandle, interval: float = HARVEST_INTERVAL_S) -> None:
     """Per-handle background task. Polls get_task(), extracts FOUND lines,
     keyword-filters, writes Convex mentions. Idempotent via seen_post_urls.
@@ -125,38 +239,63 @@ async def _harvest_loop(handle: AgentHandle, interval: float = HARVEST_INTERVAL_
                         blob_parts.append(val)
                 blob = "\n".join(blob_parts)
 
-                for url, author, summary in _extract_found_lines(blob):
-                    if url in handle.seen_post_urls:
+                for url, author, raw_summary in _extract_found_lines(blob):
+                    if url in handle.seen_post_urls or url in handle.rejected_post_urls:
                         continue
-                    if not _is_relevant(f"{url} {summary}", handle.company):
+                    # Cheap guard first — drops obvious garbage before we
+                    # pay for the LLM judge call.
+                    if not _is_relevant(f"{url} {raw_summary}", handle.company):
+                        handle.rejected_post_urls.add(url)
                         logger.debug(
-                            "harvest dropped (not about %s): %s",
-                            handle.company, url,
+                            "harvest keyword-dropped: %s", url,
                         )
                         continue
-                    handle.seen_post_urls.add(url)
-                    if not handle.run_id:
-                        # mentions schema requires runId — skip if we don't have one
-                        continue
-                    try:
-                        await cx.add_mention(
-                            session_id=handle.convex_session_id,
-                            run_id=handle.run_id,
-                            mention={
-                                "platform": handle.platform,
-                                "postId": url,
-                                "postUrl": url,
-                                "postText": summary,
-                                "authorHandle": author,
-                                "authorDisplayName": author,
-                                "matchedTerms": [handle.company],
-                            },
-                        )
+
+                    # LLM judge — verifies the post is actually about the
+                    # company AND opinion-bearing, and rewrites the summary
+                    # into a Rachel-style insight.
+                    verdict = await _judge_post(
+                        handle.company, handle.platform, url, author, raw_summary,
+                    )
+                    if not verdict or not verdict.get("relevant"):
+                        handle.rejected_post_urls.add(url)
                         logger.info(
-                            "harvested %s mention: %s", handle.platform, url,
+                            "harvest judge-rejected %s: %s", handle.platform, url,
                         )
-                    except Exception as exc:
-                        logger.warning("add_mention failed: %s", exc)
+                        continue
+
+                    insight = (verdict.get("insight") or "").strip()
+                    if not insight:
+                        handle.rejected_post_urls.add(url)
+                        continue
+
+                    handle.seen_post_urls.add(url)
+
+                    if handle.run_id:
+                        try:
+                            await cx.add_mention(
+                                session_id=handle.convex_session_id,
+                                run_id=handle.run_id,
+                                mention={
+                                    "platform": handle.platform,
+                                    "postId": url,
+                                    "postUrl": url,
+                                    "postText": insight,
+                                    "authorHandle": author,
+                                    "authorDisplayName": author,
+                                    "matchedTerms": [handle.company],
+                                },
+                            )
+                            logger.info(
+                                "harvested %s insight: %s", handle.platform, insight,
+                            )
+                        except Exception as exc:
+                            logger.warning("add_mention failed: %s", exc)
+
+                    # Push to iMessage + echo to dashboard chat.
+                    await _push_insight(
+                        handle.participant, handle.platform, insight, url,
+                    )
 
             handle.last_step_seen = max(
                 int(getattr(s, "number", 0) or 0) for s in new_steps
@@ -216,15 +355,35 @@ _TIKTOK_HARD_RULES = (
 
 _OBSERVATION_TRAILER = (
     "\n\nThis is a SUPERVISED, OPEN-ENDED observation task. There is NO terminal "
-    "JSON output expected. Keep watching the feed indefinitely:\n"
+    "JSON output expected. Keep watching the feed indefinitely.\n\n"
+    "QUALITY BAR — be RUTHLESSLY selective. Only emit a FOUND line when ALL "
+    "of these are true:\n"
+    " 1. The post is EXPLICITLY about the tracked company. The company "
+    "name (or one of its products / public people) must be the SUBJECT of "
+    "the post — not a tangential mention, not an item in a 'top 10' "
+    "listicle, not a footnote in a roundup.\n"
+    " 2. The post contains substantive OPINION, SENTIMENT, CRITICISM, "
+    "PRAISE, or CONCERN — from the author or visible commenters. Pure "
+    "news announcements, press-release reposts, ad copy, and bare links "
+    "DO NOT QUALIFY.\n"
+    " 3. It is NOT: a job listing, a hiring/career-advice post, a course "
+    "ad, a giveaway, a 'just learned about X' beginner question, or a "
+    "promo for an unrelated product that happens to mention the company.\n"
+    " 4. You can read the full post text (if it's truncated and you "
+    "can't expand it inline, SKIP it — do not navigate away).\n"
+    "When in doubt, SKIP. Quality > quantity. It is much better to FOUND "
+    "zero posts in a scroll cycle than to surface noise.\n\n"
+    "FOUND FORMAT — append EXACTLY ONE LINE per qualifying post to your "
+    "memory (no surrounding prose, no quotes, no markdown):\n"
+    "     FOUND | <full_post_permalink_url> | <author_handle_or_display_name> | <one-sentence opinion-focused summary>\n"
+    "   Use the literal `|` as separator. The url MUST be the absolute "
+    "permalink to the individual post, never the search page. The summary "
+    "should describe what people THINK or FEEL (e.g. 'commenters worried "
+    "about the new privacy policy', 'OP frustrated with rate limits', "
+    "'praising the new feature'), NOT what happened ('the company "
+    "released X'). Skip posts you have already FOUND'd in a prior step.\n\n"
+    "LOOP:\n"
     " - Periodically scroll to surface new posts.\n"
-    " - When you see a NEW post that mentions the topic, append EXACTLY ONE "
-    "LINE to your memory in this format (no surrounding prose, no quotes, "
-    "no markdown, one post per line):\n"
-    "     FOUND | <full_post_url> | <author_handle_or_display_name> | <one-sentence summary of the post>\n"
-    "   Use the literal pipe character `|` as the separator. The url MUST "
-    "be the absolute permalink to the individual post, never the search "
-    "page. Skip posts you have already FOUND'd in a prior step.\n"
     " - Stay on the listing; do not navigate away.\n"
     " - If the page errors out or hits an auth wall, reload the start URL.\n"
     "Continue until you receive a new task instruction or until the session is stopped."
