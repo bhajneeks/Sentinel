@@ -500,10 +500,13 @@ function makeExtraPlatform(session: LiveSession, index: number, total: number): 
 }
 
 export default function AgentScene({ participant }: AgentSceneProps) {
+  // Hard scope to the selected participant. When none is selected we skip
+  // the query entirely so we never accidentally render another user's
+  // sessions on the active tab.
   const cloudSessions =
     useQuery(
       api.sessions.activeCloud,
-      participant ? { participant } : { participant: undefined },
+      participant ? { participant } : "skip",
     ) ?? [];
 
   const { slotByPlatform, extras } = useMemo(() => {

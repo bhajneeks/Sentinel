@@ -403,7 +403,7 @@ function SceneOverlayLive({ participant }: { participant: string | null }) {
   const sessions =
     useQuery(
       api.sessions.activeCloud,
-      participant ? { participant } : { participant: undefined },
+      participant ? { participant } : "skip",
     ) ?? [];
   const [stopping, setStopping] = useState(false);
   const liveCount = sessions.length;
