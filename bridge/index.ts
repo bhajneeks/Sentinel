@@ -14,13 +14,25 @@ type IncomingMessage = {
   createdAt: Date;
 };
 
+const deriveParticipant = (msg: IncomingMessage): string | null => {
+  if (msg.participant) return msg.participant;
+  if (msg.chatKind === "group") return null;
+  if (!msg.chatId) return null;
+  // Apple format: "service;-;handle" (e.g. "any;-;+15551234567")
+  const parts = msg.chatId.split(";-;");
+  if (parts.length === 2 && parts[1]) return parts[1];
+  return null;
+};
+
 const forward = async (msg: IncomingMessage) => {
   if (msg.isFromMe) return;
+
+  const participant = deriveParticipant(msg);
 
   const payload = {
     id: msg.id,
     text: msg.text,
-    participant: msg.participant,
+    participant,
     chatId: msg.chatId,
     chatKind: msg.chatKind,
     service: msg.service,
