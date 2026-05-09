@@ -1,4 +1,4 @@
-# nozomioABC
+# Sentinel
 
 Live iMessage dashboard with an OpenAI reply agent and a 3D agent-mesh visualization.
 
