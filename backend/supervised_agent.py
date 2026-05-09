@@ -324,7 +324,10 @@ _LINKEDIN_HARD_RULES = (
     "2. NEVER click 'Sign in with Google/Apple', 'Join now', or any auth button.\n"
     "3. Dismiss popups (X, Escape, 'Not now', or click outside).\n"
     "4. NEVER send a connection request, follow, like, comment, repost, or message.\n"
-    "5. Stay on the search results feed. Click only inline 'see more' to expand a post in place.\n"
+    "5. You MAY click into a post's detail page to read its full text + "
+    "top comments. After reading, press the browser BACK button to return "
+    "to the search results feed. Do NOT navigate to author profiles, "
+    "company pages, hashtag pages, or 'Show more results' / pagination.\n"
 )
 
 _X_HARD_RULES = (
@@ -396,10 +399,27 @@ def _linkedin_task(company: str) -> tuple[str, str]:
         "https://www.linkedin.com/search/results/content/"
         f"?keywords={q}&sortBy=%22date_posted%22"
     )
+    extra = (
+        "BEFORE EMITTING FOUND for any LinkedIn post, do these two things:\n"
+        " - Click the inline 'see more' link on the post body so the full "
+        "text is visible. If you cannot expand it, SKIP this post.\n"
+        " - Click 'show more comments' or scroll the comment section to "
+        "read the TOP 3-5 COMMENTS. Comments are where opinion lives on "
+        "LinkedIn — the post itself is often a press release or self-promo, "
+        "but commenters are honest. If there are zero comments OR the "
+        "comments are pure congratulations / hashtags / no substance, SKIP.\n"
+        "The FOUND summary must capture WHAT THE COMMENTERS THINK "
+        "(or, if the post body itself contains a strong personal take, "
+        "what the AUTHOR thinks). Avoid generic 'OP shares news about X'.\n\n"
+        "DUPLICATE GUARD — before writing a new FOUND line, scan your own "
+        "memory for any prior FOUND line with the same post URL. If you "
+        "find one, SILENTLY SKIP. Never emit the same URL twice.\n"
+    )
     body = (
         f"You are a LinkedIn research agent monitoring posts about '{company}'.\n"
         "Make sure the 'Posts' tab is selected and results are sorted by 'Latest'.\n\n"
-        f"{_LINKEDIN_HARD_RULES}"
+        f"{_LINKEDIN_HARD_RULES}\n"
+        f"{extra}"
         f"{_OBSERVATION_TRAILER}"
     )
     return start, body
@@ -432,11 +452,34 @@ def _reddit_task(company: str) -> tuple[str, str]:
 def _tiktok_task(company: str) -> tuple[str, str]:
     q = urllib.parse.quote(company)
     start = f"https://www.tiktok.com/search/video?q={q}"
+    extra = (
+        "TIKTOK SPECIAL RULES — captions alone are weak signal. You CANNOT "
+        "watch the video itself, so YOU MUST READ THE COMMENTS to gauge "
+        "sentiment. For each video you consider:\n"
+        " - Read the full caption (expand if truncated).\n"
+        " - Locate the comments panel (right side on desktop, bottom sheet "
+        "on mobile). If the panel is collapsed, click the comment-bubble "
+        "icon to open it. Scroll inside the comment panel to load more.\n"
+        " - Read the TOP 5-10 COMMENTS (sorted by 'Most relevant' or "
+        "'Top'). These carry the actual sentiment about the video and the "
+        "company.\n"
+        " - If the video has zero comments OR the comments are pure emoji "
+        "/ '' / unrelated spam, SKIP this video.\n"
+        "The FOUND summary MUST capture what the commenters say or feel "
+        "about the company — e.g. 'commenters split on whether Anthropic's "
+        "valuation is justified', 'top reply mocks the CEO's "
+        "predictions about coding jobs'. NEVER summarize only the caption "
+        "or the creator's framing.\n\n"
+        "DUPLICATE GUARD — before writing a new FOUND line, scan your own "
+        "memory for any prior FOUND line with the same video URL. If you "
+        "find one, SILENTLY SKIP.\n"
+    )
     body = (
         f"You are a TikTok research agent monitoring videos about '{company}'.\n"
         "Make sure the 'Videos' tab is selected. Click the first thumbnail to open the player, "
         "then advance with the Down arrow.\n\n"
-        f"{_TIKTOK_HARD_RULES}"
+        f"{_TIKTOK_HARD_RULES}\n"
+        f"{extra}"
         f"{_OBSERVATION_TRAILER}"
     )
     return start, body
@@ -494,9 +537,11 @@ async def _start_one(
     *,
     override_task: str | None = None,
     run_id: str | None = None,
+    start_harvester: bool = True,
 ) -> AgentHandle:
     """Open a keep_alive session, publish to Convex, start the initial task,
-    and kick off the harvester loop."""
+    and kick off the harvester loop. Pass start_harvester=False for
+    diagnostic flows that want to poll raw step output themselves."""
     builder = _DEFAULT_TASK_BUILDERS[platform]
     start_url, default_task = builder(company)
     task_text = override_task or default_task
@@ -545,7 +590,8 @@ async def _start_one(
         run_id=run_id,
         company=company,
     )
-    handle.harvest_task = asyncio.create_task(_harvest_loop(handle))
+    if start_harvester:
+        handle.harvest_task = asyncio.create_task(_harvest_loop(handle))
     return handle
 
 
@@ -558,6 +604,7 @@ async def spawn_company_agents(
     *,
     run_id: str | None = None,
     overrides: dict[str, str] | None = None,
+    start_harvester: bool = True,
 ) -> dict[str, str]:
     """Open one supervised session per platform for `company`.
 
@@ -591,6 +638,7 @@ async def spawn_company_agents(
                 participant, p, company,
                 override_task=overrides.get(p),
                 run_id=run_id,
+                start_harvester=start_harvester,
             )
             return p, handle
         except Exception as exc:
