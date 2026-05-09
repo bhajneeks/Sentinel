@@ -2,8 +2,10 @@
 
 import { Billboard, Float, Html, Line, OrbitControls, RoundedBox, Stars } from "@react-three/drei";
 import { Canvas, useFrame } from "@react-three/fiber";
-import { useRef } from "react";
+import { useQuery } from "convex/react";
+import { useMemo, useRef } from "react";
 import * as THREE from "three";
+import { api } from "../../../../convex/_generated/api";
 
 type Platform = {
   id: string;
@@ -34,7 +36,7 @@ const PLATFORMS: Platform[] = [
     initial: "𝕏",
     color: "#ffffff",
     emissive: "#cbd5e1",
-    position: [0, -1.4, 1.6],
+    position: [0, -1.6, 1.8],
     phase: 1.7,
   },
   {
@@ -47,7 +49,31 @@ const PLATFORMS: Platform[] = [
     position: [3.6, 0.6, 0.3],
     phase: 3.4,
   },
+  {
+    id: "tiktok",
+    label: "TikTok",
+    url: "tiktok.com",
+    initial: "♪",
+    color: "#ff0050",
+    emissive: "#00f2ea",
+    position: [0, 1.9, -1.5],
+    phase: 5.1,
+  },
 ];
+
+const FALLBACK_PLATFORM: Omit<Platform, "id" | "label" | "url" | "initial" | "position" | "phase"> = {
+  color: "#a78bfa",
+  emissive: "#c4b5fd",
+};
+
+const MAX_EXTRA_LIVE_NODES = 3;
+
+type LiveSession = {
+  _id: string;
+  platform: string;
+  query: string;
+  liveUrl: string;
+};
 
 function CoreNode() {
   const meshRef = useRef<THREE.Mesh>(null);
@@ -110,7 +136,13 @@ type LineHandle = {
 const FLOAT_X_AMP = 0.06;
 const FLOAT_Y_AMP = 0.08;
 
-function PlatformAssembly({ platform }: { platform: Platform }) {
+function PlatformAssembly({
+  platform,
+  live,
+}: {
+  platform: Platform;
+  live?: LiveSession | null;
+}) {
   const browserGroupRef = useRef<THREE.Group>(null);
   const lineRef = useRef<LineHandle | null>(null);
 
@@ -151,9 +183,9 @@ function PlatformAssembly({ platform }: { platform: Platform }) {
           platform.position,
         ]}
         color={platform.color}
-        lineWidth={1.5}
+        lineWidth={live ? 2.2 : 1.5}
         transparent
-        opacity={0.6}
+        opacity={live ? 0.85 : 0.6}
         dashed
         dashSize={0.18}
         gapSize={0.12}
@@ -166,14 +198,20 @@ function PlatformAssembly({ platform }: { platform: Platform }) {
         position={platform.position}
       >
         <group ref={browserGroupRef}>
-          <BrowserChrome platform={platform} />
+          <BrowserChrome platform={platform} live={live ?? null} />
         </group>
       </Billboard>
     </>
   );
 }
 
-function BrowserChrome({ platform }: { platform: Platform }) {
+function BrowserChrome({
+  platform,
+  live,
+}: {
+  platform: Platform;
+  live: LiveSession | null;
+}) {
   const screenRef = useRef<THREE.Mesh>(null);
 
   useFrame((state) => {
@@ -183,12 +221,14 @@ function BrowserChrome({ platform }: { platform: Platform }) {
       0.35 + Math.sin(state.clock.elapsedTime * 1.2 + platform.phase) * 0.08;
   });
 
+  const addressText = live ? "live.browser-use.com" : platform.url;
+
   return (
     <group>
       {/* glow halo behind */}
       <mesh position={[0, 0, -0.04]}>
         <planeGeometry args={[2.2, 1.55]} />
-        <meshBasicMaterial color={platform.emissive} transparent opacity={0.14} />
+        <meshBasicMaterial color={platform.emissive} transparent opacity={live ? 0.22 : 0.14} />
       </mesh>
 
       {/* body */}
@@ -224,44 +264,96 @@ function BrowserChrome({ platform }: { platform: Platform }) {
         position={[0.2, 0.52, 0.045]}
         occlude={false}
       >
-        <div className="pointer-events-none whitespace-nowrap font-mono text-[8px] text-zinc-400 tracking-wider">
-          {platform.url}
+        <div className="pointer-events-none flex items-center gap-1 whitespace-nowrap font-mono text-[8px] text-zinc-400 tracking-wider">
+          {live ? (
+            <span className="flex items-center gap-1 rounded-full bg-rose-500/30 px-1.5 py-[1px] font-semibold text-[7px] text-rose-200 ring-1 ring-rose-400/40">
+              <span className="h-1 w-1 animate-pulse rounded-full bg-rose-300" />
+              LIVE
+            </span>
+          ) : null}
+          {addressText}
         </div>
       </Html>
 
-      {/* screen content panel */}
-      <mesh ref={screenRef} position={[0, -0.085, 0.032]}>
-        <planeGeometry args={[1.86, 1.0]} />
-        <meshStandardMaterial
-          color={platform.color}
-          emissive={platform.emissive}
-          emissiveIntensity={0.4}
-          metalness={0.2}
-          roughness={0.5}
-        />
-      </mesh>
+      {/* screen content panel — rendered only when not live (live iframe replaces it) */}
+      {!live && (
+        <>
+          <mesh ref={screenRef} position={[0, -0.085, 0.032]}>
+            <planeGeometry args={[1.86, 1.0]} />
+            <meshStandardMaterial
+              color={platform.color}
+              emissive={platform.emissive}
+              emissiveIntensity={0.4}
+              metalness={0.2}
+              roughness={0.5}
+            />
+          </mesh>
+          <ContentRows color={platform.emissive} />
+          <Html
+            center
+            distanceFactor={5}
+            position={[0, -0.085, 0.05]}
+            occlude={false}
+          >
+            <div
+              className="pointer-events-none flex select-none flex-col items-center gap-1 font-bold text-white"
+              style={{ textShadow: `0 0 20px ${platform.emissive}` }}
+            >
+              <span className="text-4xl leading-none">{platform.initial}</span>
+              <span className="font-mono text-[9px] uppercase tracking-[0.3em] opacity-80">
+                {platform.label}
+              </span>
+            </div>
+          </Html>
+        </>
+      )}
 
-      {/* content rows simulating page content */}
-      <ContentRows color={platform.emissive} />
-
-      {/* big platform glyph */}
-      <Html
-        center
-        distanceFactor={5}
-        position={[0, -0.085, 0.05]}
-        occlude={false}
-      >
-        <div
-          className="pointer-events-none flex select-none flex-col items-center gap-1 font-bold text-white"
-          style={{ textShadow: `0 0 20px ${platform.emissive}` }}
-        >
-          <span className="text-4xl leading-none">{platform.initial}</span>
-          <span className="font-mono text-[9px] uppercase tracking-[0.3em] opacity-80">
-            {platform.label}
-          </span>
-        </div>
-      </Html>
+      {live && <LiveScreen liveUrl={live.liveUrl} platform={platform} query={live.query} />}
     </group>
+  );
+}
+
+function LiveScreen({
+  liveUrl,
+  platform,
+  query,
+}: {
+  liveUrl: string;
+  platform: Platform;
+  query: string;
+}) {
+  // Iframe rendered as a transformed HTML plane in 3D space, sized to fit
+  // the 1.86 x 1.0 world-unit screen panel.
+  return (
+    <Html
+      transform
+      occlude
+      position={[0, -0.085, 0.034]}
+      distanceFactor={1}
+      style={{ pointerEvents: "auto" }}
+    >
+      <div
+        className="relative overflow-hidden rounded-[6px] ring-1 ring-white/10"
+        style={{
+          width: 372,
+          height: 200,
+          boxShadow: `0 0 24px ${platform.emissive}55`,
+        }}
+      >
+        <iframe
+          src={liveUrl}
+          loading="lazy"
+          referrerPolicy="no-referrer"
+          sandbox="allow-scripts allow-same-origin"
+          allow="autoplay; clipboard-read; clipboard-write"
+          title={`${platform.label} live · ${query}`}
+          className="h-full w-full border-0"
+        />
+        <div className="pointer-events-none absolute right-1.5 bottom-1.5 rounded-full bg-black/70 px-1.5 py-[2px] font-mono text-[8px] text-zinc-200 ring-1 ring-white/10 backdrop-blur">
+          {platform.label} · {query}
+        </div>
+      </div>
+    </Html>
   );
 }
 
@@ -304,11 +396,68 @@ function TrafficLight({
   );
 }
 
+/** Compute a deterministic ring slot for an extra orbital node. */
+function orbitalPosition(index: number, total: number): [number, number, number] {
+  const denom = Math.max(total, 3);
+  const theta = (Math.PI * 2 * index) / denom;
+  const radius = 4.2;
+  const y = 1.4 + (index % 2 === 0 ? 0 : -0.6);
+  return [Math.cos(theta) * radius, y, Math.sin(theta) * radius];
+}
+
+function makeExtraPlatform(session: LiveSession, index: number, total: number): Platform {
+  const base = PLATFORMS.find((p) => p.id === session.platform);
+  return {
+    id: `extra:${session._id}`,
+    label: base?.label ?? session.platform,
+    url: base?.url ?? "browser-use.com",
+    initial: base?.initial ?? "·",
+    color: base?.color ?? FALLBACK_PLATFORM.color,
+    emissive: base?.emissive ?? FALLBACK_PLATFORM.emissive,
+    position: orbitalPosition(index, total),
+    phase: (index * 1.7) % (Math.PI * 2),
+  };
+}
+
 export default function AgentScene() {
+  const cloudSessions = useQuery(api.sessions.activeCloud) ?? [];
+
+  const { slotByPlatform, extras } = useMemo(() => {
+    const grouped = new Map<string, LiveSession[]>();
+    for (const s of cloudSessions) {
+      const list = grouped.get(s.platform) ?? [];
+      list.push(s);
+      grouped.set(s.platform, list);
+    }
+    const slot = new Map<string, LiveSession>();
+    const overflow: LiveSession[] = [];
+    for (const platform of PLATFORMS) {
+      const list = grouped.get(platform.id) ?? [];
+      if (list.length > 0) {
+        slot.set(platform.id, list[0]);
+        overflow.push(...list.slice(1));
+      }
+    }
+    for (const [pid, list] of grouped) {
+      if (!PLATFORMS.find((p) => p.id === pid)) {
+        overflow.push(...list);
+      }
+    }
+    return {
+      slotByPlatform: slot,
+      extras: overflow.slice(0, MAX_EXTRA_LIVE_NODES),
+    };
+  }, [cloudSessions]);
+
   return (
     <Canvas
       camera={{ position: [0, 1.5, 7], fov: 50 }}
-      gl={{ antialias: true, alpha: true }}
+      gl={{
+        antialias: true,
+        alpha: true,
+        powerPreference: "high-performance",
+        failIfMajorPerformanceCaveat: false,
+      }}
       style={{ background: "transparent" }}
     >
       <color attach="background" args={["#05030f"]} />
@@ -324,7 +473,19 @@ export default function AgentScene() {
       <CoreNode />
 
       {PLATFORMS.map((platform) => (
-        <PlatformAssembly key={platform.id} platform={platform} />
+        <PlatformAssembly
+          key={platform.id}
+          platform={platform}
+          live={slotByPlatform.get(platform.id) ?? null}
+        />
+      ))}
+
+      {extras.map((session, i) => (
+        <PlatformAssembly
+          key={session._id}
+          platform={makeExtraPlatform(session, i, extras.length)}
+          live={session}
+        />
       ))}
 
       <OrbitControls
@@ -338,3 +499,4 @@ export default function AgentScene() {
     </Canvas>
   );
 }
+

@@ -116,6 +116,8 @@ async def scrape(
         profile_name=profile_name,
         profile_id=pid,
         no_profile=no_profile,
+        convex_platform="linkedin",
+        convex_query=query,
     )
     return {
         "platform": "linkedin",
@@ -164,9 +166,11 @@ def main() -> None:
         llm=args.llm,
         no_open=args.no_open,
         profile_name=args.profile,
-        profile_id=args.profile_id,
+        profile_id=args.profile_id or os.environ.get(PROFILE_ENV_VAR),
         no_profile=args.no_profile,
         banner_extra={"Query:": args.query, "Top N:": str(args.top)},
+        convex_platform="linkedin",
+        convex_query=args.query,
     ))
 
 

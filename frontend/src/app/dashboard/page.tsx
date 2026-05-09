@@ -301,7 +301,7 @@ function DashboardInner() {
           </section>
           <section className="relative flex-1 bg-[#05030f]">
             <AgentScene />
-            <SceneOverlay />
+            <SceneOverlayLive />
           </section>
         </div>
       </div>
@@ -399,7 +399,13 @@ function BackgroundGlow() {
   );
 }
 
-function SceneOverlay() {
+function SceneOverlayLive() {
+  const sessions = useQuery(api.sessions.activeCloud) ?? [];
+  const liveCount = sessions.length;
+  const summary =
+    liveCount === 0
+      ? "4 browsers · idle"
+      : `${liveCount} live · ${4 - Math.min(liveCount, 4)} idle`;
   return (
     <div className="pointer-events-none absolute inset-0 flex flex-col justify-between p-4">
       <div className="flex items-center justify-between">
@@ -409,8 +415,14 @@ function SceneOverlay() {
           </div>
           <div className="font-medium text-sm text-white/90">Live scrape network</div>
         </div>
-        <div className="rounded-full bg-black/40 px-2.5 py-1 font-mono text-[10px] text-zinc-400 ring-1 ring-white/10 backdrop-blur">
-          3 browsers · idle
+        <div
+          className={`rounded-full px-2.5 py-1 font-mono text-[10px] ring-1 backdrop-blur ${
+            liveCount > 0
+              ? "bg-rose-500/10 text-rose-200 ring-rose-400/30"
+              : "bg-black/40 text-zinc-400 ring-white/10"
+          }`}
+        >
+          {summary}
         </div>
       </div>
       <div className="flex items-end justify-between font-mono text-[10px] text-zinc-500">
@@ -418,6 +430,7 @@ function SceneOverlay() {
           <Legend dot="#ff4500" label="Reddit" />
           <Legend dot="#e2e8f0" label="X" />
           <Legend dot="#0a66c2" label="LinkedIn" />
+          <Legend dot="#ff0050" label="TikTok" />
         </div>
         <div className="text-zinc-600">drag to rotate</div>
       </div>

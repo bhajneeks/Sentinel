@@ -5,6 +5,7 @@ export const PLATFORM = v.union(
   v.literal("reddit"),
   v.literal("x"),
   v.literal("linkedin"),
+  v.literal("tiktok"),
 );
 
 export const RUN_STATUS = v.union(
@@ -43,7 +44,7 @@ export default defineSchema({
     .index("by_status", ["status"]),
 
   scraperSessions: defineTable({
-    runId: v.id("agentRuns"),
+    runId: v.optional(v.id("agentRuns")),
     platform: PLATFORM,
     query: v.string(),
     status: SESSION_STATUS,
@@ -52,6 +53,10 @@ export default defineSchema({
     error: v.optional(v.string()),
     /** Whether this session is using a real browser (counts toward 25-concurrency cap). */
     browserBacked: v.boolean(),
+    /** Browser-Use Cloud iframe URL when this session is a cloud scroll. */
+    liveUrl: v.optional(v.string()),
+    /** Opaque Browser-Use Cloud session id (for cross-reference / debugging). */
+    cloudSessionId: v.optional(v.string()),
   })
     .index("by_run", ["runId"])
     .index("by_status", ["status"])
