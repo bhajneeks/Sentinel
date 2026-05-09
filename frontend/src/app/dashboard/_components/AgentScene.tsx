@@ -3,7 +3,7 @@
 import { Billboard, Float, Html, Line, OrbitControls, RoundedBox, Stars } from "@react-three/drei";
 import { Canvas, useFrame } from "@react-three/fiber";
 import { useQuery } from "convex/react";
-import { useMemo, useRef } from "react";
+import { Component, type ReactNode, useEffect, useMemo, useRef, useState } from "react";
 import * as THREE from "three";
 import { api } from "../../../../convex/_generated/api";
 
@@ -419,17 +419,43 @@ function makeExtraPlatform(session: LiveSession, index: number, total: number): 
   };
 }
 
-export default function AgentScene() {
-  const cloudSessions = useQuery(api.sessions.activeCloud) ?? [];
+function detectWebGL(): boolean {
+  try {
+    const canvas = document.createElement("canvas");
+    const ctx =
+      canvas.getContext("webgl2") ||
+      canvas.getContext("webgl") ||
+      canvas.getContext("experimental-webgl");
+    return !!ctx;
+  } catch {
+    return false;
+  }
+}
 
-  const { slotByPlatform, extras } = useMemo(() => {
+class WebGLErrorBoundary extends Component<
+  { children: ReactNode; onError: () => void; fallback: ReactNode },
+  { errored: boolean }
+> {
+  state = { errored: false };
+  static getDerivedStateFromError() {
+    return { errored: true };
+  }
+  componentDidCatch() {
+    this.props.onError();
+  }
+  render() {
+    return this.state.errored ? this.props.fallback : this.props.children;
+  }
+}
+
+function useGroupedSessions(cloudSessions: LiveSession[]) {
+  return useMemo(() => {
     const grouped = new Map<string, LiveSession[]>();
     for (const s of cloudSessions) {
       const list = grouped.get(s.platform) ?? [];
       list.push(s);
       grouped.set(s.platform, list);
     }
-
     const slot = new Map<string, LiveSession>();
     const overflow: LiveSession[] = [];
     for (const platform of PLATFORMS) {
@@ -439,7 +465,6 @@ export default function AgentScene() {
         overflow.push(...list.slice(1));
       }
     }
-    // sessions whose platform isn't a known slot
     for (const [pid, list] of grouped) {
       if (!PLATFORMS.find((p) => p.id === pid)) {
         overflow.push(...list);
@@ -450,12 +475,129 @@ export default function AgentScene() {
       extras: overflow.slice(0, MAX_EXTRA_LIVE_NODES),
     };
   }, [cloudSessions]);
+}
 
+function FallbackScene({
+  cloudSessions,
+}: {
+  cloudSessions: LiveSession[];
+}) {
+  const { slotByPlatform, extras } = useGroupedSessions(cloudSessions);
+  return (
+    <div className="relative h-full w-full overflow-auto p-6">
+      <div className="pointer-events-none absolute top-3 left-1/2 -translate-x-1/2 rounded-full bg-amber-500/10 px-3 py-1 font-mono text-[10px] text-amber-200 ring-1 ring-amber-400/30">
+        WebGL unavailable · 2D view
+      </div>
+      <div className="mx-auto grid max-w-3xl grid-cols-1 gap-4 pt-10 sm:grid-cols-2">
+        {PLATFORMS.map((p) => (
+          <FallbackCard
+            key={p.id}
+            platform={p}
+            live={slotByPlatform.get(p.id) ?? null}
+          />
+        ))}
+      </div>
+      {extras.length > 0 && (
+        <div className="mx-auto mt-6 max-w-3xl">
+          <div className="mb-2 font-mono text-[10px] text-violet-300/60 uppercase tracking-[0.25em]">
+            Orbital · {extras.length}
+          </div>
+          <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+            {extras.map((s) => {
+              const base = PLATFORMS.find((p) => p.id === s.platform);
+              const fakePlatform: Platform = base ?? {
+                id: s._id,
+                label: s.platform,
+                url: "browser-use.com",
+                initial: "·",
+                color: FALLBACK_PLATFORM.color,
+                emissive: FALLBACK_PLATFORM.emissive,
+                position: [0, 0, 0],
+                phase: 0,
+              };
+              return <FallbackCard key={s._id} platform={fakePlatform} live={s} />;
+            })}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function FallbackCard({
+  platform,
+  live,
+}: {
+  platform: Platform;
+  live: LiveSession | null;
+}) {
+  return (
+    <div
+      className="overflow-hidden rounded-lg ring-1 ring-white/10"
+      style={{ boxShadow: live ? `0 0 30px ${platform.emissive}55` : undefined }}
+    >
+      <div className="flex items-center gap-2 border-b border-white/5 bg-[#15132a] px-3 py-1.5">
+        <span className="h-1.5 w-1.5 rounded-full bg-rose-400" />
+        <span className="h-1.5 w-1.5 rounded-full bg-amber-300" />
+        <span className="h-1.5 w-1.5 rounded-full bg-emerald-400" />
+        <span className="ml-2 flex items-center gap-2 font-mono text-[9px] text-zinc-400 tracking-wider">
+          {live ? (
+            <span className="flex items-center gap-1 rounded-full bg-rose-500/20 px-1.5 py-[1px] font-semibold text-[8px] text-rose-200 ring-1 ring-rose-400/40">
+              <span className="h-1 w-1 animate-pulse rounded-full bg-rose-300" />
+              LIVE
+            </span>
+          ) : null}
+          {live ? "live.browser-use.com" : platform.url}
+        </span>
+      </div>
+      <div className="relative aspect-[16/9] bg-[#0b0a18]">
+        {live ? (
+          <iframe
+            src={live.liveUrl}
+            loading="lazy"
+            referrerPolicy="no-referrer"
+            sandbox="allow-scripts allow-same-origin"
+            title={`${platform.label} live · ${live.query}`}
+            className="h-full w-full border-0"
+          />
+        ) : (
+          <div
+            className="flex h-full w-full flex-col items-center justify-center gap-1 font-bold text-white"
+            style={{
+              background: `radial-gradient(circle, ${platform.emissive}40 0%, transparent 70%)`,
+              textShadow: `0 0 20px ${platform.emissive}`,
+            }}
+          >
+            <span className="text-4xl leading-none">{platform.initial}</span>
+            <span className="font-mono text-[9px] uppercase tracking-[0.3em] opacity-80">
+              {platform.label}
+            </span>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function Scene3D({
+  cloudSessions,
+  onWebGLError,
+}: {
+  cloudSessions: LiveSession[];
+  onWebGLError: () => void;
+}) {
+  const { slotByPlatform, extras } = useGroupedSessions(cloudSessions);
   return (
     <Canvas
       camera={{ position: [0, 1.5, 7], fov: 50 }}
-      gl={{ antialias: true, alpha: true }}
+      gl={{ antialias: true, alpha: true, failIfMajorPerformanceCaveat: false }}
       style={{ background: "transparent" }}
+      onCreated={({ gl }) => {
+        gl.domElement.addEventListener("webglcontextlost", (e) => {
+          e.preventDefault();
+          onWebGLError();
+        });
+      }}
     >
       <color attach="background" args={["#05030f"]} />
       <fog attach="fog" args={["#05030f", 9, 20]} />
@@ -496,3 +638,34 @@ export default function AgentScene() {
     </Canvas>
   );
 }
+
+export default function AgentScene() {
+  const cloudSessions = useQuery(api.sessions.activeCloud) ?? [];
+  const [webgl, setWebgl] = useState<"checking" | "ok" | "no">("checking");
+
+  useEffect(() => {
+    setWebgl(detectWebGL() ? "ok" : "no");
+  }, []);
+
+  if (webgl === "checking") {
+    return (
+      <div className="flex h-full items-center justify-center text-xs text-violet-300/50">
+        booting agent mesh…
+      </div>
+    );
+  }
+
+  if (webgl === "no") {
+    return <FallbackScene cloudSessions={cloudSessions} />;
+  }
+
+  return (
+    <WebGLErrorBoundary
+      onError={() => setWebgl("no")}
+      fallback={<FallbackScene cloudSessions={cloudSessions} />}
+    >
+      <Scene3D cloudSessions={cloudSessions} onWebGLError={() => setWebgl("no")} />
+    </WebGLErrorBoundary>
+  );
+}
+
