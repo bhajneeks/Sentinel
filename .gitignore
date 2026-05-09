@@ -23,3 +23,4 @@ bridge/.env*.local
 
 # Nia pipeline state (contains source IDs tied to your account)
 pipeline.json
+.gstack/

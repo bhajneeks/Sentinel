@@ -15,15 +15,20 @@ Each platform script just defines `build_task(...)` and calls `run_scrape`.
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 import sys
 import webbrowser
-from typing import Awaitable, Callable
+from typing import Awaitable, Callable, Literal
 
 from dotenv import load_dotenv
 
 load_dotenv(".env.local")
 load_dotenv()
+
+logger = logging.getLogger("browser_use_common")
+
+ConvexPlatform = Literal["reddit", "x", "linkedin"]
 
 # Windows consoles default to cp1252 and crash on emoji in agent output.
 for _stream in (sys.stdout, sys.stderr):
@@ -115,6 +120,38 @@ def _print_session_banner(
         print(f"{k:<11} {v}")
 
 
+async def _publish_cloud_session(
+    *, platform: ConvexPlatform, query: str, live_url: str, cloud_session_id: str
+) -> str | None:
+    """Best-effort registration of this cloud session with Convex.
+
+    Returns the convex session id, or None if Convex isn't configured / fails.
+    """
+    if not os.environ.get("CONVEX_URL"):
+        return None
+    try:
+        import convex_client as cx  # local import — keeps scroll usable without convex
+        return await cx.start_cloud_session(
+            platform=platform,
+            query=query,
+            live_url=live_url,
+            cloud_session_id=cloud_session_id,
+        )
+    except Exception as exc:
+        logger.warning("convex publish failed: %s", exc)
+        return None
+
+
+async def _finish_cloud_session(convex_session_id: str, status: str, error: str | None = None) -> None:
+    if not convex_session_id:
+        return
+    try:
+        import convex_client as cx
+        await cx.finish_session(convex_session_id, status, error)
+    except Exception as exc:
+        logger.warning("convex finish failed: %s", exc)
+
+
 async def run_scrape(
     *,
     start_url: str,
@@ -125,8 +162,15 @@ async def run_scrape(
     profile_id: str | None,
     no_profile: bool,
     banner_extra: dict[str, str] | None = None,
+    convex_platform: ConvexPlatform | None = None,
+    convex_query: str | None = None,
 ) -> None:
-    """Create a session, run the task, poll until done, and clean up."""
+    """Create a session, run the task, poll until done, and clean up.
+
+    When `convex_platform` is provided AND `CONVEX_URL` is set, this also
+    publishes the live cloud session to Convex so the dashboard renders the
+    live_url iframe in the matching platform slot.
+    """
     client = make_client()
     resolved_profile_id = await resolve_profile_id(
         client,
@@ -147,6 +191,19 @@ async def run_scrape(
         print("Opening live preview in your default browser...")
         webbrowser.open(session.live_url)
 
+    convex_session_id: str | None = None
+    if convex_platform and session.live_url:
+        convex_session_id = await _publish_cloud_session(
+            platform=convex_platform,
+            query=convex_query or "",
+            live_url=session.live_url,
+            cloud_session_id=session.id,
+        )
+        if convex_session_id:
+            print(f"Published to Convex (session id: {convex_session_id}).")
+
+    final_status: str = "complete"
+    final_error: str | None = None
     try:
         print("Starting task...")
         task_resp = await client.tasks.create_task(
@@ -172,9 +229,18 @@ async def run_scrape(
                 print(f"Success: {status.is_success}")
                 if status.output:
                     print("Output:", status.output)
+                if not status.is_success:
+                    final_status = "error"
+                    final_error = "task did not succeed"
                 break
             await asyncio.sleep(3)
+    except Exception as exc:
+        final_status = "error"
+        final_error = str(exc)
+        raise
     finally:
+        if convex_session_id:
+            await _finish_cloud_session(convex_session_id, final_status, final_error)
         await stop_session(client, session.id)
 
 

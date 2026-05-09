@@ -73,6 +73,23 @@ async def start_session(
     })
 
 
+async def start_cloud_session(
+    *, platform: str, query: str, live_url: str, cloud_session_id: str
+) -> str:
+    """Register a Browser-Use Cloud scroll session with Convex.
+
+    Standalone — no run_id. Used by `*_scroll.py` so the dashboard can render
+    the live iframe in the matching platform slot.
+    """
+    client = get_client()
+    return await _run(client.mutation, "sessions:startCloud", {
+        "platform": platform,
+        "query": query,
+        "liveUrl": live_url,
+        "cloudSessionId": cloud_session_id,
+    })
+
+
 async def finish_session(
     session_id: str, status: str, error: str | None = None
 ) -> None:

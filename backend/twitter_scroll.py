@@ -115,6 +115,8 @@ def main() -> None:
         profile_id=args.profile_id,
         no_profile=args.no_profile,
         banner_extra={"Query:": args.query, "Top N:": str(args.top)},
+        convex_platform="x",
+        convex_query=args.query,
     ))
 
 

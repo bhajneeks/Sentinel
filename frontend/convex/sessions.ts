@@ -21,6 +21,26 @@ export const start = mutation({
   },
 });
 
+export const startCloud = mutation({
+  args: {
+    platform: PLATFORM,
+    query: v.string(),
+    liveUrl: v.string(),
+    cloudSessionId: v.string(),
+  },
+  handler: async (ctx, { platform, query, liveUrl, cloudSessionId }) => {
+    return await ctx.db.insert("scraperSessions", {
+      platform,
+      query,
+      status: "running",
+      startedAt: Date.now(),
+      browserBacked: true,
+      liveUrl,
+      cloudSessionId,
+    });
+  },
+});
+
 export const finish = mutation({
   args: {
     sessionId: v.id("scraperSessions"),
@@ -43,6 +63,30 @@ export const byRun = query({
       .query("scraperSessions")
       .withIndex("by_run", (q) => q.eq("runId", runId))
       .collect();
+  },
+});
+
+/** Currently-live cloud sessions (those exposing a live_url). */
+export const activeCloud = query({
+  args: {},
+  handler: async (ctx) => {
+    const running = await ctx.db
+      .query("scraperSessions")
+      .withIndex("by_status", (q) => q.eq("status", "running"))
+      .collect();
+    const starting = await ctx.db
+      .query("scraperSessions")
+      .withIndex("by_status", (q) => q.eq("status", "starting"))
+      .collect();
+    return [...starting, ...running]
+      .filter((s) => typeof s.liveUrl === "string" && s.liveUrl.length > 0)
+      .map((s) => ({
+        _id: s._id,
+        platform: s.platform,
+        query: s.query,
+        liveUrl: s.liveUrl as string,
+        startedAt: s.startedAt,
+      }));
   },
 });
 
