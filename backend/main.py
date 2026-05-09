@@ -103,7 +103,7 @@ async def _generate_and_broadcast(source: Message) -> None:
     if not history:
         return
     try:
-        reply_text = await agent.generate_reply(history)
+        reply_text = await agent.generate_reply(history, participant=participant)
     except Exception as exc:  # network / auth / rate limit
         logger.warning("agent reply failed: %s", exc)
         return
@@ -350,8 +350,28 @@ def reopen_conversation(participant: str):
     closed_participants.discard(participant)
 
 
+def _derive_participant(message: Message) -> str | None:
+    """The Photon SDK leaves `participant` null on some inbound messages even
+    though `chatId` contains the handle (Apple format: 'service;-;handle').
+    Recover it for DMs so Rachel can group the conversation correctly."""
+    if message.participant:
+        return message.participant
+    if message.chatKind == "group":
+        return None
+    if not message.chatId:
+        return None
+    parts = message.chatId.split(";-;")
+    if len(parts) == 2 and parts[1]:
+        return parts[1]
+    return None
+
+
 @app.post("/api/messages/ingest", status_code=204)
 async def ingest_message(message: Message):
+    derived = _derive_participant(message)
+    if derived and derived != message.participant:
+        message = message.model_copy(update={"participant": derived})
+
     if message.participant in closed_participants:
         closed_participants.discard(message.participant)
     messages.append(message)

@@ -1,13 +1,18 @@
 "use client";
 
+import { ConvexProvider, useQuery } from "convex/react";
 import dynamic from "next/dynamic";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { api } from "../../../convex/_generated/api";
+import { convex } from "../../lib/convex";
 import ChatThread from "./_components/ChatThread";
 import Tabs from "./_components/Tabs";
 import type {
   ConnectionState,
   Conversation,
   Message,
+  MentionPayload,
+  Platform,
 } from "./types";
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
@@ -24,6 +29,14 @@ const AgentScene = dynamic(() => import("./_components/AgentScene"), {
 });
 
 export default function Dashboard() {
+  return (
+    <ConvexProvider client={convex}>
+      <DashboardInner />
+    </ConvexProvider>
+  );
+}
+
+function DashboardInner() {
   const [messages, setMessages] = useState<Message[]>([]);
   const [conversations, setConversations] = useState<Conversation[]>([]);
   const [activeParticipant, setActiveParticipant] = useState<string | null>(null);
@@ -214,6 +227,41 @@ export default function Dashboard() {
     [thinkingFor, activeParticipant],
   );
 
+  const liveMentions = useQuery(
+    api.mentions.byParticipant,
+    activeParticipant ? { participant: activeParticipant, limit: 50 } : "skip",
+  );
+
+  const mergedMessages = useMemo(() => {
+    if (!liveMentions || liveMentions.length === 0) return messages;
+    if (!activeParticipant) return messages;
+
+    const synthesized: Message[] = liveMentions.map((m) => ({
+      id: `mention:${m._id}`,
+      text: null,
+      participant: activeParticipant,
+      chatId: null,
+      chatKind: "dm",
+      service: "agent",
+      createdAt: new Date(m.foundAt).toISOString(),
+      direction: "outbound",
+      mention: {
+        platform: m.platform as Platform,
+        postUrl: m.postUrl,
+        postText: m.postText,
+        authorHandle: m.authorHandle,
+        postedAt: m.postedAt ?? undefined,
+        screenshotUrl: null,
+      } satisfies MentionPayload,
+    }));
+
+    const existing = new Set(messages.map((m) => m.id));
+    return [
+      ...messages,
+      ...synthesized.filter((s) => !existing.has(s.id)),
+    ];
+  }, [messages, liveMentions, activeParticipant]);
+
   return (
     <main className="relative h-screen overflow-hidden bg-[#05030f] font-sans text-zinc-100">
       <BackgroundGlow />
@@ -246,7 +294,7 @@ export default function Dashboard() {
         <div className="flex flex-1 overflow-hidden">
           <section className="flex w-[340px] shrink-0 flex-col border-white/5 border-r">
             <ChatThread
-              messages={messages}
+              messages={mergedMessages}
               participant={activeParticipant}
               isAgentThinking={isThinkingForActive}
             />

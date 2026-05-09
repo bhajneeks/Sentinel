@@ -99,30 +99,77 @@ function CoreNode() {
   );
 }
 
-function BrowserWindow({ platform }: { platform: Platform }) {
-  const groupRef = useRef<THREE.Group>(null);
+type LineHandle = {
+  geometry: {
+    setPositions(positions: number[]): void;
+    computeLineDistances?(): void;
+  };
+  material: { dashOffset?: number };
+};
+
+const FLOAT_X_AMP = 0.06;
+const FLOAT_Y_AMP = 0.08;
+
+function PlatformAssembly({ platform }: { platform: Platform }) {
+  const browserGroupRef = useRef<THREE.Group>(null);
+  const lineRef = useRef<LineHandle | null>(null);
 
   useFrame((state) => {
-    if (!groupRef.current) return;
     const t = state.clock.elapsedTime;
-    groupRef.current.position.y =
-      platform.position[1] + Math.sin(t * 0.7 + platform.phase) * 0.12;
-    groupRef.current.position.x =
-      platform.position[0] + Math.cos(t * 0.5 + platform.phase) * 0.08;
+    const dx = Math.cos(t * 0.5 + platform.phase) * FLOAT_X_AMP;
+    const dy = Math.sin(t * 0.7 + platform.phase) * FLOAT_Y_AMP;
+
+    if (browserGroupRef.current) {
+      browserGroupRef.current.position.set(dx, dy, 0);
+    }
+
+    const line = lineRef.current;
+    if (line) {
+      line.geometry.setPositions([
+        0,
+        0,
+        0,
+        platform.position[0] + dx,
+        platform.position[1] + dy,
+        platform.position[2],
+      ]);
+      line.geometry.computeLineDistances?.();
+      if (line.material.dashOffset !== undefined) {
+        line.material.dashOffset = -t * 0.6 + platform.phase;
+      }
+    }
   });
 
   return (
-    <Billboard
-      follow
-      lockX={false}
-      lockY={false}
-      lockZ={false}
-      position={platform.position}
-    >
-      <group ref={groupRef}>
-        <BrowserChrome platform={platform} />
-      </group>
-    </Billboard>
+    <>
+      <Line
+        ref={(el) => {
+          lineRef.current = el as unknown as LineHandle | null;
+        }}
+        points={[
+          [0, 0, 0],
+          platform.position,
+        ]}
+        color={platform.color}
+        lineWidth={1.5}
+        transparent
+        opacity={0.6}
+        dashed
+        dashSize={0.18}
+        gapSize={0.12}
+      />
+      <Billboard
+        follow
+        lockX={false}
+        lockY={false}
+        lockZ={false}
+        position={platform.position}
+      >
+        <group ref={browserGroupRef}>
+          <BrowserChrome platform={platform} />
+        </group>
+      </Billboard>
+    </>
   );
 }
 
@@ -257,46 +304,6 @@ function TrafficLight({
   );
 }
 
-function ConnectionLine({
-  to,
-  color,
-  phase,
-}: {
-  to: [number, number, number];
-  color: string;
-  phase: number;
-}) {
-  const lineRef = useRef<THREE.Group>(null);
-
-  useFrame((state) => {
-    const line = lineRef.current?.children[0] as THREE.Line | undefined;
-    const mat = line?.material as
-      | (THREE.LineDashedMaterial & { dashOffset: number })
-      | undefined;
-    if (mat && "dashOffset" in mat) {
-      mat.dashOffset = -state.clock.elapsedTime * 0.6 + phase;
-    }
-  });
-
-  return (
-    <group ref={lineRef}>
-      <Line
-        points={[
-          [0, 0, 0],
-          to,
-        ]}
-        color={color}
-        lineWidth={1.5}
-        transparent
-        opacity={0.55}
-        dashed
-        dashSize={0.18}
-        gapSize={0.12}
-      />
-    </group>
-  );
-}
-
 export default function AgentScene() {
   return (
     <Canvas
@@ -317,16 +324,7 @@ export default function AgentScene() {
       <CoreNode />
 
       {PLATFORMS.map((platform) => (
-        <ConnectionLine
-          key={`line-${platform.id}`}
-          to={platform.position}
-          color={platform.color}
-          phase={platform.phase}
-        />
-      ))}
-
-      {PLATFORMS.map((platform) => (
-        <BrowserWindow key={platform.id} platform={platform} />
+        <PlatformAssembly key={platform.id} platform={platform} />
       ))}
 
       <OrbitControls

@@ -117,6 +117,16 @@ function Bubble({
 }) {
   const isOutbound = message.direction === "outbound";
 
+  if (message.mention) {
+    return (
+      <MentionBubble
+        message={message}
+        groupedTop={groupedTop}
+        showTimestamp={showTimestamp}
+      />
+    );
+  }
+
   const radius = isOutbound
     ? `rounded-2xl ${groupedTop ? "rounded-tr-md" : ""} ${groupedBottom ? "rounded-br-md" : ""}`
     : `rounded-2xl ${groupedTop ? "rounded-tl-md" : ""} ${groupedBottom ? "rounded-bl-md" : ""}`;
@@ -143,6 +153,100 @@ function Bubble({
           }`}
         >
           {isOutbound ? "Delivered" : ""} {formatTime(message.createdAt)}
+        </div>
+      )}
+    </div>
+  );
+}
+
+const PLATFORM_META: Record<
+  NonNullable<Message["mention"]>["platform"],
+  { label: string; color: string; glyph: string; host: string }
+> = {
+  reddit: {
+    label: "Reddit",
+    color: "#ff4500",
+    glyph: "R",
+    host: "reddit.com",
+  },
+  x: { label: "X", color: "#e2e8f0", glyph: "𝕏", host: "x.com" },
+  linkedin: {
+    label: "LinkedIn",
+    color: "#0a66c2",
+    glyph: "in",
+    host: "linkedin.com",
+  },
+};
+
+function MentionBubble({
+  message,
+  groupedTop,
+  showTimestamp,
+}: {
+  message: Message;
+  groupedTop: boolean;
+  showTimestamp: boolean;
+}) {
+  const m = message.mention;
+  if (!m) return null;
+  const meta = PLATFORM_META[m.platform];
+  const snippet =
+    m.postText.length > 240 ? `${m.postText.slice(0, 240).trim()}…` : m.postText;
+
+  return (
+    <div
+      className={`flex animate-[bubblePop_0.28s_cubic-bezier(0.34,1.56,0.64,1)] flex-col items-end ${
+        groupedTop ? "mt-0.5" : "mt-2"
+      }`}
+    >
+      <a
+        href={m.postUrl}
+        target="_blank"
+        rel="noopener noreferrer"
+        className="group flex max-w-[88%] flex-col gap-2 overflow-hidden rounded-2xl rounded-br-md bg-[#0f1216] p-2 shadow-[0_1px_10px_rgba(0,0,0,0.5)] ring-1 ring-white/10 transition-all hover:ring-white/20"
+        style={{
+          background: `linear-gradient(180deg, ${meta.color}1A 0%, #0f1216 60%)`,
+        }}
+      >
+        <div className="flex items-center gap-2 px-1 pt-1">
+          <span
+            className="flex h-5 w-5 items-center justify-center rounded font-bold text-[10px] text-white"
+            style={{ background: meta.color }}
+          >
+            {meta.glyph}
+          </span>
+          <span className="font-medium text-white/85 text-xs">
+            {meta.label}
+          </span>
+          <span className="font-mono text-[10px] text-white/40">
+            {m.authorHandle ? `@${m.authorHandle.replace(/^u\//, "")}` : meta.host}
+          </span>
+          <span className="ml-auto font-mono text-[10px] text-white/30">
+            {meta.host}
+          </span>
+        </div>
+        {m.screenshotUrl ? (
+          <div className="relative overflow-hidden rounded-lg">
+            <img
+              src={m.screenshotUrl}
+              alt={`${meta.label} screenshot`}
+              className="h-32 w-full object-cover"
+            />
+          </div>
+        ) : null}
+        <p className="whitespace-pre-wrap break-words px-1 pb-1 text-[13px] text-white/90 leading-snug">
+          {snippet}
+        </p>
+        <div className="flex items-center justify-between border-white/5 border-t px-1 pt-2 text-[10px]">
+          <span className="text-white/50">tap to open ↗</span>
+          <span className="font-mono text-white/30">
+            {formatTime(message.createdAt)}
+          </span>
+        </div>
+      </a>
+      {showTimestamp && (
+        <div className="mt-1 px-1 text-right text-[10px] text-zinc-500 tabular-nums">
+          Found {formatTime(message.createdAt)}
         </div>
       )}
     </div>
