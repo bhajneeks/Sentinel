@@ -115,6 +115,70 @@ def _is_relevant(haystack: str, company: str) -> bool:
     return company.lower() in haystack.lower()
 
 
+# Each platform's expected permalink shape. Generic site URLs (search
+# pages, profile pages, hashtag pages) get rejected — those would render
+# as broken links in iMessage.
+_URL_PERMALINK_PATTERNS: dict[ConvexPlatform, re.Pattern[str]] = {
+    "linkedin": re.compile(
+        r"linkedin\.com/(posts/[^/?]+|feed/update/urn:li:activity:\d+)",
+        re.IGNORECASE,
+    ),
+    "x": re.compile(
+        r"(?:^|//(?:www\.)?(?:x|twitter)\.com/)[A-Za-z0-9_]+/status/\d+",
+        re.IGNORECASE,
+    ),
+    "reddit": re.compile(
+        r"reddit\.com/r/[^/]+/comments/[A-Za-z0-9_]+",
+        re.IGNORECASE,
+    ),
+    "tiktok": re.compile(
+        r"tiktok\.com/@[^/]+/video/\d+",
+        re.IGNORECASE,
+    ),
+}
+
+_DEFAULT_HOST: dict[ConvexPlatform, str] = {
+    "linkedin": "https://www.linkedin.com",
+    "x": "https://x.com",
+    "reddit": "https://www.reddit.com",
+    "tiktok": "https://www.tiktok.com",
+}
+
+
+def _normalize_post_url(platform: ConvexPlatform, raw: str) -> str | None:
+    """Repair + validate a FOUND-line URL. Returns the absolute permalink
+    when it matches the platform's expected shape; otherwise None.
+
+    - Trims trailing punctuation that LLMs sometimes append.
+    - Promotes a leading '/' relative path to the platform's host.
+    - Rejects search pages, profile pages, hashtag pages, raw domain hits.
+    """
+    url = (raw or "").strip().rstrip("),.;:!?\"'")
+    if not url:
+        return None
+
+    # Repair relative paths emitted by the agent.
+    if url.startswith("/"):
+        host = _DEFAULT_HOST.get(platform)
+        if host:
+            url = host + url
+    elif not url.lower().startswith(("http://", "https://")):
+        # Bare host or junk — try prepending the canonical host if it
+        # looks like a path rooted at the platform domain.
+        for cand in _DEFAULT_HOST.values():
+            tail = cand.split("//", 1)[1]  # e.g. www.linkedin.com
+            if url.lower().startswith(tail.lower()):
+                url = "https://" + url
+                break
+        if not url.lower().startswith(("http://", "https://")):
+            return None
+
+    pattern = _URL_PERMALINK_PATTERNS.get(platform)
+    if pattern is None:
+        return url  # unknown platform — accept whatever we got
+    return url if pattern.search(url) else None
+
+
 _JUDGE_SYSTEM = (
     "You are filtering social media posts for QUALITY + RELEVANCE. You are "
     "extremely strict. Most posts SHOULD be rejected. Respond with valid "
@@ -627,11 +691,26 @@ async def _harvest_loop(handle: AgentHandle, interval: float = HARVEST_INTERVAL_
                         blob_parts.append(val)
                 blob = "\n".join(blob_parts)
 
-                for url, author, raw_summary in _extract_found_lines(blob):
+                for raw_url, author, raw_summary in _extract_found_lines(blob):
+                    if raw_url in handle.seen_post_urls or raw_url in handle.rejected_post_urls:
+                        continue
+                    # Validate + repair the URL — relative paths get
+                    # promoted to absolute, junk URLs (search pages,
+                    # profiles, hashtags) get rejected so they never
+                    # land in iMessage as broken links.
+                    url = _normalize_post_url(handle.platform, raw_url)
+                    if url is None:
+                        handle.rejected_post_urls.add(raw_url)
+                        logger.debug(
+                            "harvest url-rejected (not a %s permalink): %s",
+                            handle.platform, raw_url,
+                        )
+                        continue
                     if url in handle.seen_post_urls or url in handle.rejected_post_urls:
                         continue
-                    # Cheap guard first — drops obvious garbage before we
-                    # pay for the LLM judge call.
+
+                    # Cheap guard — drops obvious garbage before paying
+                    # for the LLM judge call.
                     if not _is_relevant(f"{url} {raw_summary}", handle.company):
                         handle.rejected_post_urls.add(url)
                         logger.debug(
@@ -793,9 +872,19 @@ _OBSERVATION_TRAILER = (
     "FOUND FORMAT — append EXACTLY ONE LINE per qualifying post to your "
     "memory (no surrounding prose, no quotes, no markdown):\n"
     "     FOUND | <full_post_permalink_url> | <author_handle_or_display_name> | <one-sentence opinion-focused summary>\n"
-    "   Use the literal `|` as separator. The url MUST be the absolute "
-    "permalink to the individual post, never the search page. The summary "
-    "should describe what people THINK or FEEL (e.g. 'commenters worried "
+    "   Use the literal `|` as separator.\n\n"
+    "URL RULES (strict — broken URLs cause the message to be dropped):\n"
+    " - The url MUST start with https:// and be the COMPLETE absolute "
+    "permalink to the individual post. Never a relative path (no leading "
+    "'/'), never the search page, never a profile / hashtag / company page.\n"
+    " - For X/Twitter: https://x.com/<handle>/status/<numeric_id>\n"
+    " - For LinkedIn: https://www.linkedin.com/posts/<slug>  OR  "
+    "https://www.linkedin.com/feed/update/urn:li:activity:<numeric_id>\n"
+    " - For Reddit: https://www.reddit.com/r/<sub>/comments/<id>/<slug>\n"
+    " - For TikTok: https://www.tiktok.com/@<handle>/video/<numeric_id>\n"
+    " - If you cannot find / extract the absolute permalink for a post, "
+    "SKIP that post entirely. Do NOT emit FOUND with a partial or made-up URL.\n\n"
+    "SUMMARY: describe what people THINK or FEEL (e.g. 'commenters worried "
     "about the new privacy policy', 'OP frustrated with rate limits', "
     "'praising the new feature'), NOT what happened ('the company "
     "released X'). Skip posts you have already FOUND'd in a prior step.\n\n"

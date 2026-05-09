@@ -151,18 +151,17 @@ function _energyColor(energy: number): string {
 }
 
 /**
- * Energy bar — rendered as an HTML overlay floating ABOVE every BrowserChrome,
- * not inside the chrome interior. The live-stream iframe occupies the entire
- * screen-panel area and renders in CSS3D, which visually covers anything
- * positioned beneath it. Putting the bar above the chrome's title bar means
- * it's always visible regardless of iframe size, camera angle, or occlusion.
+ * Energy bar — placed inside the chrome's title bar, immediately right of
+ * the macOS-style traffic-light buttons. Same render layer as the existing
+ * address-pill text (drei <Html> overlay scaled by distanceFactor), so
+ * visibility is guaranteed regardless of iframe / camera angle.
  *
  * States:
  *   - active session w/ energy   → colored fill + numeric percentage
  *   - active session, energy null → amber 50% + "warming up"
  *   - no session (idle slot)      → muted track only + "idle"
  */
-function EnergyBarOverlay({
+function EnergyBarTitlebar({
   energy,
   restartCount,
   isLive,
@@ -178,44 +177,49 @@ function EnergyBarOverlay({
   if (!isLive) {
     ratio = 0;
     color = "#6b7280";
-    label = "idle";
+    label = "IDLE";
   } else if (energy === null) {
     ratio = 0.5;
     color = "#fbbf24";
-    label = "warming up";
+    label = "WARMING";
   } else {
     const clamped = Math.max(0, Math.min(100, energy));
     ratio = clamped / 100;
     color = _energyColor(clamped);
-    label = `⚡ ${Math.round(clamped)}`;
+    label = `⚡${Math.round(clamped)}`;
   }
 
   return (
     <Html
       center
       distanceFactor={3.2}
-      position={[0, 0.86, 0.05]}
+      // Title bar is at y=0.52 z=0.034. Traffic lights occupy x=-0.82..-0.66.
+      // We anchor right-of-dots at x=-0.42 for the pill's center.
+      position={[-0.42, 0.52, 0.05]}
       occlude={false}
       zIndexRange={[100000, 100000]}
     >
       <div
-        className="pointer-events-none flex w-[180px] flex-col items-stretch gap-1"
-        style={{ filter: isLive ? `drop-shadow(0 0 8px ${color}66)` : undefined }}
+        className="pointer-events-none flex items-center gap-1.5 whitespace-nowrap rounded-full bg-black/70 px-2 py-[2px] ring-1 ring-white/10 backdrop-blur"
+        style={{ filter: isLive ? `drop-shadow(0 0 6px ${color}80)` : undefined }}
       >
-        <div className="flex items-center justify-between font-mono text-[10px] font-semibold tracking-[0.2em] uppercase">
-          <span style={{ color }}>{label}</span>
-          {restartCount > 0 ? (
-            <span className="rounded-full bg-violet-500/30 px-1.5 py-[1px] text-violet-100 text-[8px] ring-1 ring-violet-400/40">
-              ×{restartCount}
-            </span>
-          ) : null}
-        </div>
-        <div className="h-1.5 w-full overflow-hidden rounded-full bg-black/60 ring-1 ring-white/10">
-          <div
-            className="h-full transition-[width] duration-500"
+        <span
+          className="font-mono text-[9px] font-bold tracking-wider"
+          style={{ color }}
+        >
+          {label}
+        </span>
+        <span className="block h-1.5 w-12 overflow-hidden rounded-full bg-zinc-900/80 ring-1 ring-white/10">
+          <span
+            className="block h-full transition-[width] duration-500"
             style={{ width: `${ratio * 100}%`, background: color }}
           />
-        </div>
+        </span>
+        {restartCount > 0 ? (
+          <span className="rounded-full bg-violet-500/30 px-1.5 py-[1px] font-mono text-[8px] font-semibold text-violet-100 ring-1 ring-violet-400/40">
+            r{restartCount}
+          </span>
+        ) : null}
       </div>
     </Html>
   );
@@ -394,7 +398,7 @@ function BrowserChrome({
       )}
 
       {live && <LiveScreen liveUrl={live.liveUrl} platform={platform} query={live.query} />}
-      <EnergyBarOverlay
+      <EnergyBarTitlebar
         isLive={!!live}
         energy={live && typeof live.energy === "number" ? live.energy : null}
         restartCount={live?.restartCount ?? 0}
