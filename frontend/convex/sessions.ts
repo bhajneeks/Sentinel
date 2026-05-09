@@ -56,6 +56,19 @@ export const finish = mutation({
   },
 });
 
+/** Update the `query` of a running session — used when a supervised
+ * agent's task is redirected mid-flight so the dashboard tooltip reflects
+ * the current task. */
+export const updateQuery = mutation({
+  args: {
+    sessionId: v.id("scraperSessions"),
+    query: v.string(),
+  },
+  handler: async (ctx, { sessionId, query }) => {
+    await ctx.db.patch(sessionId, { query });
+  },
+});
+
 export const byRun = query({
   args: { runId: v.id("agentRuns") },
   handler: async (ctx, { runId }) => {

@@ -65,10 +65,24 @@ async def _scheduled_run() -> None:
         logger.error("monitor scheduled run failed: %s", exc)
 
 
+async def _supervised_janitor_tick() -> None:
+    try:
+        import supervised_agent
+        await supervised_agent.janitor_tick()
+    except Exception as exc:
+        logger.error("supervised janitor tick failed: %s", exc)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     import monitor_agent
     _scheduler.start()
+    _scheduler.add_job(
+        _supervised_janitor_tick,
+        IntervalTrigger(minutes=5),
+        id="supervised_janitor",
+        replace_existing=True,
+    )
     yield
     _scheduler.shutdown(wait=False)
     monitor_agent._executor.shutdown(wait=False)

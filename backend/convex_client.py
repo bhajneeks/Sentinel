@@ -100,6 +100,19 @@ async def finish_session(
     await _run(client.mutation, "sessions:finish", args)
 
 
+async def update_session_query(session_id: str, query: str) -> None:
+    """Update the live `query` text on a running scraperSessions row.
+
+    Used when a supervised agent's task is redirected, so the dashboard
+    label reflects the new task.
+    """
+    client = get_client()
+    await _run(client.mutation, "sessions:updateQuery", {
+        "sessionId": session_id,
+        "query": query,
+    })
+
+
 async def active_browser_count() -> int:
     client = get_client()
     raw = await _run(client.query, "sessions:activeBrowserCount", {})

@@ -22,6 +22,7 @@ from typing import Any
 
 import convex_client as cx
 import scraper_stream
+import supervised_agent
 
 logger = logging.getLogger("uvicorn.error")
 
@@ -124,6 +125,111 @@ TOOL_DEFS: list[dict[str, Any]] = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "screenshot",
+            "description": (
+                "Get the latest step screenshot + state of a supervised "
+                "browser agent (those auto-spawned by track_company). "
+                "Pass `platform` (linkedin / x / reddit / tiktok) for the "
+                "primary slot, or `linkedin@2` for an orbit instance. "
+                "Returns task_status, current_url, step_summary, and a "
+                "screenshot_url you can include in your reply."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "platform": {
+                        "type": "string",
+                        "description": "Platform name or instance id (e.g. 'linkedin' or 'linkedin@2').",
+                    },
+                },
+                "required": ["platform"],
+                "additionalProperties": False,
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "redirect",
+            "description": (
+                "Steer a running supervised browser agent to a new task "
+                "without losing the session. Stops the current task, "
+                "queues a new one on the same browser. Use this when "
+                "you want the agent to look at something different on "
+                "the same platform (e.g. 'now check the company's "
+                "engineering jobs page' or 'search for layoffs')."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "platform": {
+                        "type": "string",
+                        "description": "Platform name or instance id (e.g. 'linkedin').",
+                    },
+                    "task": {
+                        "type": "string",
+                        "description": "Plain-English task instruction for the browser agent.",
+                    },
+                },
+                "required": ["platform", "task"],
+                "additionalProperties": False,
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "close",
+            "description": (
+                "Stop a supervised browser agent. Frees a slot. If an "
+                "orbit instance exists for that platform, it is promoted "
+                "to fill the slot."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "platform": {
+                        "type": "string",
+                        "description": "Platform name or instance id.",
+                    },
+                },
+                "required": ["platform"],
+                "additionalProperties": False,
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "spawn",
+            "description": (
+                "Open an ADDITIONAL supervised browser agent on a "
+                "platform that already has one running. Useful when "
+                "you want a parallel investigation on the same platform "
+                "(e.g. one LinkedIn agent watching general posts, "
+                "another reading the company page). Becomes an orbital "
+                "node on the dashboard. Counts toward the 25-browser cap."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "platform": {
+                        "type": "string",
+                        "enum": ["linkedin", "x", "reddit", "tiktok"],
+                    },
+                    "task": {
+                        "type": "string",
+                        "description": "Optional plain-English task. If omitted, uses the platform default for the active company.",
+                    },
+                },
+                "required": ["platform"],
+                "additionalProperties": False,
+            },
+        },
+    },
 ]
 
 
@@ -158,9 +264,49 @@ async def _track_company(args: dict[str, Any], *, participant: str) -> str:
 
     run_id = await cx.create_run(participant, company, link)
     _active_run_by_participant[participant] = run_id
+
+    # Auto-spawn 4 supervised browser agents (one per platform) for this
+    # company. Best-effort: cap-limited platforms get reported as skipped.
+    spawn_results = await supervised_agent.spawn_company_agents(participant, company)
+    spawn_summary = ", ".join(f"{p}={s}" for p, s in spawn_results.items())
+
     return (
         f"started run {run_id} for {company} ({link}). "
-        "you can now call search_reddit / search_x / search_linkedin."
+        f"agents: {spawn_summary}. "
+        "use screenshot / redirect / close / spawn to control them."
+    )
+
+
+async def _screenshot(args: dict[str, Any], *, participant: str) -> str:
+    platform = (args.get("platform") or "").strip()
+    if not platform:
+        return "error: platform is required"
+    result = await supervised_agent.screenshot(participant, platform)
+    return json.dumps(result)
+
+
+async def _redirect(args: dict[str, Any], *, participant: str) -> str:
+    platform = (args.get("platform") or "").strip()
+    task = (args.get("task") or "").strip()
+    if not platform or not task:
+        return "error: platform and task are required"
+    return await supervised_agent.redirect(participant, platform, task)
+
+
+async def _close(args: dict[str, Any], *, participant: str) -> str:
+    platform = (args.get("platform") or "").strip()
+    if not platform:
+        return "error: platform is required"
+    return await supervised_agent.close(participant, platform)
+
+
+async def _spawn(args: dict[str, Any], *, participant: str) -> str:
+    platform = (args.get("platform") or "").strip()
+    task = args.get("task")
+    if not platform:
+        return "error: platform is required"
+    return await supervised_agent.spawn(
+        participant, platform, task.strip() if isinstance(task, str) else None
     )
 
 
@@ -225,4 +371,8 @@ _HANDLERS = {
     "search_reddit": _search_reddit,
     "search_x": _search_x,
     "search_linkedin": _search_linkedin,
+    "screenshot": _screenshot,
+    "redirect": _redirect,
+    "close": _close,
+    "spawn": _spawn,
 }
