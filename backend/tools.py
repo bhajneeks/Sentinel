@@ -267,7 +267,10 @@ async def _track_company(args: dict[str, Any], *, participant: str) -> str:
 
     # Auto-spawn 4 supervised browser agents (one per platform) for this
     # company. Best-effort: cap-limited platforms get reported as skipped.
-    spawn_results = await supervised_agent.spawn_company_agents(participant, company)
+    # `run_id` is threaded through so the harvester can write mentions.
+    spawn_results = await supervised_agent.spawn_company_agents(
+        participant, company, run_id=run_id,
+    )
     spawn_summary = ", ".join(f"{p}={s}" for p, s in spawn_results.items())
 
     return (
@@ -306,7 +309,10 @@ async def _spawn(args: dict[str, Any], *, participant: str) -> str:
     if not platform:
         return "error: platform is required"
     return await supervised_agent.spawn(
-        participant, platform, task.strip() if isinstance(task, str) else None
+        participant,
+        platform,
+        task.strip() if isinstance(task, str) else None,
+        run_id=_active_run_by_participant.get(participant),
     )
 
 

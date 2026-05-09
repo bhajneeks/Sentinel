@@ -25,6 +25,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import re
 import time
 import urllib.parse
 from dataclasses import dataclass, field
@@ -45,6 +46,7 @@ PROFILE_ENV_VAR_BY_PLATFORM: dict[ConvexPlatform, str] = {
 }
 
 IDLE_CLOSE_AFTER_S = 30 * 60  # 30 minutes
+HARVEST_INTERVAL_S = 45.0
 
 
 @dataclass
@@ -58,9 +60,111 @@ class AgentHandle:
     started_at: float = field(default_factory=time.time)
     last_active_at: float = field(default_factory=time.time)
     current_task_text: str = ""
+    # Harvester state — pulled from get_task() polls.
+    run_id: str | None = None
+    company: str = ""
+    last_step_seen: int = 0
+    seen_post_urls: set[str] = field(default_factory=set)
+    harvest_task: asyncio.Task[None] | None = None
 
     def touch(self) -> None:
         self.last_active_at = time.time()
+
+
+# ── Harvester ─────────────────────────────────────────────────────────────────
+
+
+# `FOUND | <url> | <author> | <summary>` — one match per line.
+_FOUND_RE = re.compile(
+    r"^\s*FOUND\s*\|\s*(?P<url>\S+?)\s*\|\s*(?P<author>[^|]+?)\s*\|\s*(?P<summary>.+?)\s*$",
+    re.MULTILINE,
+)
+
+
+def _extract_found_lines(text: str) -> list[tuple[str, str, str]]:
+    if not text:
+        return []
+    return [
+        (m["url"].strip(), m["author"].strip(), m["summary"].strip())
+        for m in _FOUND_RE.finditer(text)
+    ]
+
+
+def _is_relevant(haystack: str, company: str) -> bool:
+    """Cheap keyword guard. Drops obviously-off posts that the agent
+    accidentally FOUND'd (e.g. when a feed pivots away from the topic)."""
+    if not company:
+        return True
+    return company.lower() in haystack.lower()
+
+
+async def _harvest_loop(handle: AgentHandle, interval: float = HARVEST_INTERVAL_S) -> None:
+    """Per-handle background task. Polls get_task(), extracts FOUND lines,
+    keyword-filters, writes Convex mentions. Idempotent via seen_post_urls.
+    """
+    client = make_client()
+    while True:
+        try:
+            await asyncio.sleep(interval)
+            try:
+                task = await client.tasks.get_task(handle.current_task_id)
+            except Exception as exc:
+                logger.debug("harvest get_task failed for %s: %s", handle.platform, exc)
+                continue
+
+            steps = list(task.steps or [])
+            new_steps = [s for s in steps if int(getattr(s, "number", 0) or 0) > handle.last_step_seen]
+            if not new_steps:
+                continue
+
+            for step in new_steps:
+                blob_parts: list[str] = []
+                for attr in ("memory", "next_goal", "evaluation_previous_goal"):
+                    val = getattr(step, attr, None)
+                    if isinstance(val, str) and val:
+                        blob_parts.append(val)
+                blob = "\n".join(blob_parts)
+
+                for url, author, summary in _extract_found_lines(blob):
+                    if url in handle.seen_post_urls:
+                        continue
+                    if not _is_relevant(f"{url} {summary}", handle.company):
+                        logger.debug(
+                            "harvest dropped (not about %s): %s",
+                            handle.company, url,
+                        )
+                        continue
+                    handle.seen_post_urls.add(url)
+                    if not handle.run_id:
+                        # mentions schema requires runId — skip if we don't have one
+                        continue
+                    try:
+                        await cx.add_mention(
+                            session_id=handle.convex_session_id,
+                            run_id=handle.run_id,
+                            mention={
+                                "platform": handle.platform,
+                                "postId": url,
+                                "postUrl": url,
+                                "postText": summary,
+                                "authorHandle": author,
+                                "authorDisplayName": author,
+                                "matchedTerms": [handle.company],
+                            },
+                        )
+                        logger.info(
+                            "harvested %s mention: %s", handle.platform, url,
+                        )
+                    except Exception as exc:
+                        logger.warning("add_mention failed: %s", exc)
+
+            handle.last_step_seen = max(
+                int(getattr(s, "number", 0) or 0) for s in new_steps
+            )
+        except asyncio.CancelledError:
+            return
+        except Exception as exc:  # pragma: no cover — defensive
+            logger.warning("harvest loop error for %s: %s", handle.platform, exc)
 
 
 # Slot session per (participant, platform). One slot per platform.
@@ -114,8 +218,13 @@ _OBSERVATION_TRAILER = (
     "\n\nThis is a SUPERVISED, OPEN-ENDED observation task. There is NO terminal "
     "JSON output expected. Keep watching the feed indefinitely:\n"
     " - Periodically scroll to surface new posts.\n"
-    " - Note (in your memory / next-goal text) any new post about the topic that "
-    "appears since the last step.\n"
+    " - When you see a NEW post that mentions the topic, append EXACTLY ONE "
+    "LINE to your memory in this format (no surrounding prose, no quotes, "
+    "no markdown, one post per line):\n"
+    "     FOUND | <full_post_url> | <author_handle_or_display_name> | <one-sentence summary of the post>\n"
+    "   Use the literal pipe character `|` as the separator. The url MUST "
+    "be the absolute permalink to the individual post, never the search "
+    "page. Skip posts you have already FOUND'd in a prior step.\n"
     " - Stay on the listing; do not navigate away.\n"
     " - If the page errors out or hits an auth wall, reload the start URL.\n"
     "Continue until you receive a new task instruction or until the session is stopped."
@@ -225,8 +334,10 @@ async def _start_one(
     company: str,
     *,
     override_task: str | None = None,
+    run_id: str | None = None,
 ) -> AgentHandle:
-    """Open a keep_alive session, publish to Convex, and start the initial task."""
+    """Open a keep_alive session, publish to Convex, start the initial task,
+    and kick off the harvester loop."""
     builder = _DEFAULT_TASK_BUILDERS[platform]
     start_url, default_task = builder(company)
     task_text = override_task or default_task
@@ -272,7 +383,10 @@ async def _start_one(
         current_task_id=task_resp.id,
         live_url=session.live_url,
         current_task_text=task_text,
+        run_id=run_id,
+        company=company,
     )
+    handle.harvest_task = asyncio.create_task(_harvest_loop(handle))
     return handle
 
 
@@ -283,12 +397,17 @@ async def spawn_company_agents(
     participant: str,
     company: str,
     *,
+    run_id: str | None = None,
     overrides: dict[str, str] | None = None,
 ) -> dict[str, str]:
     """Open one supervised session per platform for `company`.
 
     Honours the BROWSER_CONCURRENCY_CAP via convex_client.active_browser_count():
     skips platforms over cap and reports the skip in the result.
+
+    `run_id` is required for harvested mentions to land in the Convex
+    `mentions` table (which has a required runId field). Without it the
+    harvester still runs but can't write mentions.
 
     Returns: mapping platform -> "started" | "skipped: cap" | f"failed: {reason}".
     """
@@ -309,7 +428,11 @@ async def spawn_company_agents(
 
     async def _try(p: ConvexPlatform) -> tuple[ConvexPlatform, str | AgentHandle]:
         try:
-            handle = await _start_one(participant, p, company, override_task=overrides.get(p))
+            handle = await _start_one(
+                participant, p, company,
+                override_task=overrides.get(p),
+                run_id=run_id,
+            )
             return p, handle
         except Exception as exc:
             logger.warning("supervised spawn failed for %s: %s", p, exc)
@@ -385,6 +508,9 @@ async def redirect(participant: str, instance: str, task: str) -> str:
 
     handle.current_task_id = task_resp.id
     handle.current_task_text = task
+    # New task → step numbers reset. Keep seen_post_urls so we don't
+    # re-emit the same post under the redirected angle.
+    handle.last_step_seen = 0
 
     try:
         await cx.update_session_query(handle.convex_session_id, task[:200])
@@ -430,6 +556,8 @@ async def spawn(
     participant: str,
     platform: str,
     task: str | None = None,
+    *,
+    run_id: str | None = None,
 ) -> str:
     """Add an additional session on `platform` (becomes a dashboard orbital)."""
     if platform not in PLATFORMS:
@@ -439,13 +567,16 @@ async def spawn(
     if headroom <= 0:
         return f"skipped: cap reached ({cx.BROWSER_CONCURRENCY_CAP})"
 
-    # Use the existing slot's `query` as the company hint if no task given.
+    # Inherit company from the existing slot. Falls back to the slot's
+    # raw query text — if neither, harvested posts won't filter cleanly.
     slot = _registry.get(participant, {}).get(platform)  # type: ignore[arg-type]
-    company = slot.current_task_text.split("'")[1] if (slot and "'" in slot.current_task_text) else "unknown"
+    company = slot.company if slot else "unknown"
 
     try:
         handle = await _start_one(
-            participant, platform, company, override_task=task,  # type: ignore[arg-type]
+            participant, platform, company,
+            override_task=task,  # type: ignore[arg-type]
+            run_id=run_id or (slot.run_id if slot else None),
         )
     except Exception as exc:
         return f"spawn failed: {exc}"
@@ -503,6 +634,12 @@ async def close_all_for_participant(participant: str) -> int:
 
 
 async def _close_handle(handle: AgentHandle) -> None:
+    if handle.harvest_task and not handle.harvest_task.done():
+        handle.harvest_task.cancel()
+        try:
+            await handle.harvest_task
+        except (asyncio.CancelledError, Exception):
+            pass
     client = make_client()
     try:
         await client.sessions.update_session(handle.cloud_session_id, action="stop")
