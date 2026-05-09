@@ -151,64 +151,92 @@ function _energyColor(energy: number): string {
 }
 
 /**
- * Energy bar rendered as 3D meshes inside the BrowserChrome — track on top
- * of the body, fill plane scales horizontally with energy. Always visible
- * because it billboards with the rest of the chrome and doesn't rely on
- * `<Html>` occlusion.
+ * Energy bar rendered as 3D meshes inside every BrowserChrome — track + fill
+ * plane that scales with energy. Renders unconditionally:
+ *   - active session w/ energy   → colored fill + numeric label
+ *   - active session, energy null → amber 50% + "warming up"
+ *   - no session (idle slot)      → muted track only + "idle"
+ * Always visible because it's part of the chrome's billboard group.
  */
 function EnergyBar3D({
   energy,
   restartCount,
+  isLive,
 }: {
-  energy: number;
+  energy: number | null;
   restartCount: number;
+  isLive: boolean;
 }) {
-  const clamped = Math.max(0, Math.min(100, energy));
-  const ratio = clamped / 100;
-  const color = _energyColor(clamped);
+  // Bar sits along the bottom edge of the chrome. Body spans y=±0.625;
+  // screen panel ends at y=-0.585. Y=-0.605 puts the bar just below the
+  // screen with ~0.02 margin from the body bottom.
+  const TRACK_W = 1.8;
+  const TRACK_H = 0.045;
+  const Y = -0.605;
+  const Z = 0.04;
 
-  // Mounted under the screen panel, inside the body. Body spans y=±0.625;
-  // screen ends at y=-0.585 → bar lives at y=-0.6 with height 0.04.
-  const TRACK_W = 1.7;
-  const TRACK_H = 0.04;
-  const Y = -0.6;
-  const Z = 0.034;
+  let ratio: number;
+  let color: string;
+  let label: string;
+
+  if (!isLive) {
+    ratio = 0;
+    color = "#3f3a5c";
+    label = "idle";
+  } else if (energy === null) {
+    ratio = 0.5;
+    color = "#fbbf24";
+    label = "warming up";
+  } else {
+    const clamped = Math.max(0, Math.min(100, energy));
+    ratio = clamped / 100;
+    color = _energyColor(clamped);
+    label = `⚡ ${Math.round(clamped)}`;
+  }
 
   return (
     <group>
+      {/* glow halo behind (visible only when live so idle chrome stays calm) */}
+      {isLive && (
+        <mesh position={[0, Y, Z - 0.001]}>
+          <planeGeometry args={[TRACK_W + 0.08, TRACK_H + 0.06]} />
+          <meshBasicMaterial color={color} transparent opacity={0.22} />
+        </mesh>
+      )}
       {/* track */}
       <mesh position={[0, Y, Z]}>
         <planeGeometry args={[TRACK_W, TRACK_H]} />
-        <meshBasicMaterial color="#1a1530" transparent opacity={0.85} />
+        <meshBasicMaterial
+          color={isLive ? "#15132a" : "#1a1530"}
+          transparent
+          opacity={0.9}
+        />
       </mesh>
       {/* fill — scaled width, anchored to left edge */}
-      <mesh
-        position={[-(TRACK_W / 2) + (TRACK_W * ratio) / 2, Y, Z + 0.001]}
-        scale={[Math.max(ratio, 0.001), 1, 1]}
-      >
-        <planeGeometry args={[TRACK_W, TRACK_H]} />
-        <meshBasicMaterial color={color} />
-      </mesh>
-      {/* glow halo behind */}
-      <mesh position={[0, Y, Z - 0.001]}>
-        <planeGeometry args={[TRACK_W + 0.06, TRACK_H + 0.04]} />
-        <meshBasicMaterial color={color} transparent opacity={0.18} />
-      </mesh>
-      {/* numeric label */}
+      {ratio > 0 && (
+        <mesh
+          position={[-(TRACK_W / 2) + (TRACK_W * ratio) / 2, Y, Z + 0.001]}
+          scale={[Math.max(ratio, 0.001), 1, 1]}
+        >
+          <planeGeometry args={[TRACK_W, TRACK_H]} />
+          <meshBasicMaterial color={color} />
+        </mesh>
+      )}
+      {/* numeric / status label */}
       <Html
         center
-        distanceFactor={3}
-        position={[0, Y - 0.06, Z + 0.005]}
+        distanceFactor={2.6}
+        position={[0, Y - 0.085, Z + 0.005]}
         occlude={false}
       >
         <div
-          className="pointer-events-none flex items-center gap-1.5 whitespace-nowrap font-mono text-[10px] tracking-wider"
+          className="pointer-events-none flex items-center gap-1.5 whitespace-nowrap font-mono text-[11px] font-semibold tracking-wider uppercase"
           style={{ color }}
         >
-          <span>⚡ {Math.round(clamped)}</span>
+          <span>{label}</span>
           {restartCount > 0 ? (
-            <span className="rounded-full bg-violet-500/25 px-1.5 py-[1px] text-violet-200 ring-1 ring-violet-400/40">
-              revived ×{restartCount}
+            <span className="rounded-full bg-violet-500/25 px-1.5 py-[1px] text-violet-200 text-[9px] ring-1 ring-violet-400/40">
+              ×{restartCount}
             </span>
           ) : null}
         </div>
@@ -390,12 +418,11 @@ function BrowserChrome({
       )}
 
       {live && <LiveScreen liveUrl={live.liveUrl} platform={platform} query={live.query} />}
-      {live && typeof live.energy === "number" && (
-        <EnergyBar3D
-          energy={live.energy}
-          restartCount={live.restartCount ?? 0}
-        />
-      )}
+      <EnergyBar3D
+        isLive={!!live}
+        energy={live && typeof live.energy === "number" ? live.energy : null}
+        restartCount={live?.restartCount ?? 0}
+      />
     </group>
   );
 }
