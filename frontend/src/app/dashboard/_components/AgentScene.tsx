@@ -151,37 +151,26 @@ function _energyColor(energy: number): string {
 }
 
 /**
- * Energy bar — placed inside the chrome's title bar, immediately right of
- * the macOS-style traffic-light buttons. Same render layer as the existing
- * address-pill text (drei <Html> overlay scaled by distanceFactor), so
- * visibility is guaranteed regardless of iframe / camera angle.
- *
- * States:
- *   - active session w/ energy   → colored fill + numeric percentage
- *   - active session, energy null → amber 50% + "warming up"
- *   - no session (idle slot)      → muted track only + "idle"
+ * Inline energy pill — rendered next to the {Platform · URL} bubble in the
+ * bottom-right of every live iframe. Same DOM tree as the bubble so it
+ * shares scale/positioning with it and is always visible inside the chrome.
+ * Only shown when there is a live session; idle slots have no bar.
  */
-function EnergyBarTitlebar({
+function EnergyInlinePill({
   energy,
   restartCount,
-  isLive,
 }: {
   energy: number | null;
   restartCount: number;
-  isLive: boolean;
 }) {
   let ratio: number;
   let color: string;
   let label: string;
 
-  if (!isLive) {
-    ratio = 0;
-    color = "#6b7280";
-    label = "IDLE";
-  } else if (energy === null) {
+  if (energy === null) {
     ratio = 0.5;
     color = "#fbbf24";
-    label = "WARMING";
+    label = "warming";
   } else {
     const clamped = Math.max(0, Math.min(100, energy));
     ratio = clamped / 100;
@@ -190,38 +179,23 @@ function EnergyBarTitlebar({
   }
 
   return (
-    <Html
-      center
-      distanceFactor={3.2}
-      // Title bar is at y=0.52 z=0.034. Traffic lights occupy x=-0.82..-0.66.
-      // We anchor right-of-dots at x=-0.42 for the pill's center.
-      position={[-0.42, 0.52, 0.05]}
-      occlude={false}
-      zIndexRange={[100000, 100000]}
+    <div
+      className="pointer-events-none flex items-center gap-2 whitespace-nowrap rounded-full bg-black/70 px-3 py-1 font-mono text-[13px] font-semibold ring-1 ring-white/10 backdrop-blur"
+      style={{ filter: `drop-shadow(0 0 6px ${color}66)` }}
     >
-      <div
-        className="pointer-events-none flex items-center gap-1.5 whitespace-nowrap rounded-full bg-black/70 px-2 py-[2px] ring-1 ring-white/10 backdrop-blur"
-        style={{ filter: isLive ? `drop-shadow(0 0 6px ${color}80)` : undefined }}
-      >
+      <span style={{ color }}>{label}</span>
+      <span className="block h-1.5 w-16 overflow-hidden rounded-full bg-zinc-900/80 ring-1 ring-white/10">
         <span
-          className="font-mono text-[9px] font-bold tracking-wider"
-          style={{ color }}
-        >
-          {label}
+          className="block h-full transition-[width] duration-500"
+          style={{ width: `${ratio * 100}%`, background: color }}
+        />
+      </span>
+      {restartCount > 0 ? (
+        <span className="rounded-full bg-violet-500/30 px-1.5 py-[1px] text-[11px] text-violet-100 ring-1 ring-violet-400/40">
+          r{restartCount}
         </span>
-        <span className="block h-1.5 w-12 overflow-hidden rounded-full bg-zinc-900/80 ring-1 ring-white/10">
-          <span
-            className="block h-full transition-[width] duration-500"
-            style={{ width: `${ratio * 100}%`, background: color }}
-          />
-        </span>
-        {restartCount > 0 ? (
-          <span className="rounded-full bg-violet-500/30 px-1.5 py-[1px] font-mono text-[8px] font-semibold text-violet-100 ring-1 ring-violet-400/40">
-            r{restartCount}
-          </span>
-        ) : null}
-      </div>
-    </Html>
+      ) : null}
+    </div>
   );
 }
 
@@ -397,12 +371,15 @@ function BrowserChrome({
         </>
       )}
 
-      {live && <LiveScreen liveUrl={live.liveUrl} platform={platform} query={live.query} />}
-      <EnergyBarTitlebar
-        isLive={!!live}
-        energy={live && typeof live.energy === "number" ? live.energy : null}
-        restartCount={live?.restartCount ?? 0}
-      />
+      {live && (
+        <LiveScreen
+          liveUrl={live.liveUrl}
+          platform={platform}
+          query={live.query}
+          energy={typeof live.energy === "number" ? live.energy : null}
+          restartCount={live.restartCount ?? 0}
+        />
+      )}
     </group>
   );
 }
@@ -411,10 +388,14 @@ function LiveScreen({
   liveUrl,
   platform,
   query,
+  energy,
+  restartCount,
 }: {
   liveUrl: string;
   platform: Platform;
   query: string;
+  energy: number | null;
+  restartCount: number;
 }) {
   // drei's <Html transform> uses a CSS3D matrix with scale 1/(distanceFactor||10/400).
   // distanceFactor=1 + 372×200 px rendered at ~25% of the chrome plane
@@ -444,8 +425,12 @@ function LiveScreen({
           title={`${platform.label} live · ${query}`}
           className="h-full w-full border-0"
         />
-        <div className="pointer-events-none absolute right-3 bottom-3 rounded-full bg-black/70 px-3 py-1 font-mono text-[14px] text-zinc-200 ring-1 ring-white/10 backdrop-blur">
-          {platform.label} · {query}
+        {/* Bottom-right cluster: energy pill on the left, platform·url bubble on the right. */}
+        <div className="pointer-events-none absolute right-3 bottom-3 flex items-center gap-2">
+          <EnergyInlinePill energy={energy} restartCount={restartCount} />
+          <div className="rounded-full bg-black/70 px-3 py-1 font-mono text-[14px] text-zinc-200 ring-1 ring-white/10 backdrop-blur">
+            {platform.label} · {query}
+          </div>
         </div>
       </div>
     </Html>
