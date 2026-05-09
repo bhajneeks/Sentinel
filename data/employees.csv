@@ -1,0 +1,22 @@
+name,role,department,location,start_date,salary_band
+Maria Delacroix,CEO,Executive,Seattle,2021-08-01,E5
+Hiroshi Tanaka,CTO,Engineering,Seattle,2021-08-01,E5
+Daniel Okwuosa,Head of Sourcing,Operations,Addis Ababa,2022-03-14,M4
+Priya Raman,Head of Operations,Operations,Tukwila,2023-01-09,M4
+Eunjin Park,Senior Engineer,Engineering,Seattle,2023-04-17,L4
+Marco Rossi,Senior Engineer,Engineering,Remote-CET,2023-06-05,L4
+Kenji Yamamoto,ML Engineer,Engineering,Seattle,2024-02-12,L4
+Aisha Bello,Backend Engineer,Engineering,Remote-EST,2024-05-20,L3
+Liam O'Sullivan,Frontend Engineer,Engineering,Seattle,2024-08-12,L3
+Sofia Vargas,Frontend Engineer,Engineering,Remote-PST,2025-01-06,L3
+Ravi Subramanian,Platform Engineer,Engineering,Seattle,2025-03-03,L3
+Chen Wei,SRE,Engineering,Remote-PST,2025-05-19,L3
+Noor Hassan,QA Engineer,Engineering,Tukwila,2025-08-04,L2
+Tyler Nakamura,Junior Engineer,Engineering,Seattle,2025-10-13,L1
+Amelia Brooks,Head of GTM,GTM,Seattle,2024-01-15,M3
+Jonas Becker,Account Executive,GTM,Remote-EST,2024-09-02,L3
+Hana Kim,Marketing Lead,GTM,Seattle,2024-11-18,L3
+Reed Caldwell,Customer Success,GTM,Tukwila,2025-02-10,L2
+Lucia Marchetti,Brand Designer,GTM,Remote-CET,2025-06-23,L3
+Tomás Riquelme,CFO,Finance,Seattle,2024-04-08,M5
+Wendy Park,Senior Accountant,Finance,Seattle,2024-07-15,L3

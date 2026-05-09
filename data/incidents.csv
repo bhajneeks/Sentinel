@@ -1,0 +1,11 @@
+incident_id,date,severity,duration_min,service,summary,owner,root_cause
+INC-001,2025-02-04,sev2,73,billing,Stripe webhook backlog delayed subscription renewals,E. Park,Stripe rate-limiter not respecting Retry-After header
+INC-002,2025-03-21,sev1,18,orders,Order API returned 500 on all POST requests for 18 min,M. Rossi,Bad migration deployed without backfill
+INC-003,2025-04-09,sev3,210,fulfillment,Shipping label generator slow (p95 jumped 4x),P. Raman,FleetSpring API region degradation upstream
+INC-004,2025-05-30,sev2,45,auth,Customers locked out after Okta IDP rotation,Chen W.,Stale JWKS cache in API gateway
+INC-005,2025-07-14,sev2,92,billing,Failed payments not retrying — 1100 subs paused incorrectly,E. Park,Off-by-one in retry-policy day calculation
+INC-006,2025-08-22,sev1,9,orders,Order DB read replica lag → stale order status shown,R. Subramanian,Long-running ANALYZE on primary blocked replication
+INC-007,2025-10-03,sev3,180,marketing-site,Marketing site down (404s),H. Kim,DNS misconfig after vendor migration
+INC-008,2025-11-18,sev2,52,fulfillment,Roastery printer fleet stopped accepting label print jobs,P. Raman,Firmware update from vendor changed auth scheme
+INC-009,2025-12-29,sev1,24,orders,Black-Friday-effect: Postgres connection pool exhausted,Chen W.,Connection limit not raised for holiday-traffic plan
+INC-010,2026-01-15,sev2,38,api,Subscription API returning empty plans for ~3% of users,A. Bello,Cache stampede after deploy invalidated shared key

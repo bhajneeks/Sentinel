@@ -3,6 +3,7 @@ backend/.venv/
 backend/__pycache__/
 backend/**/__pycache__/
 backend/**/*.pyc
+backend/.env
 backend/.env*.local
 
 # Node / Next.js
@@ -17,3 +18,6 @@ bridge/.env*.local
 
 # OS
 .DS_Store
+
+# Nia pipeline state (contains source IDs tied to your account)
+pipeline.json
