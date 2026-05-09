@@ -1,0 +1,56 @@
+Aroma Cloud — Engineering Handbook
+===================================
+
+This is the canonical playbook for the Aroma Cloud engineering team.
+Last revised: 2025-12-08 by Hiroshi Tanaka.
+
+Stack
+-----
+- Backend: Python 3.13, FastAPI, SQLAlchemy 2.0 against Postgres 16.
+- Frontend: Next.js 16 (App Router), TypeScript, Tailwind 4.
+- Infra: AWS (us-west-2 primary, us-east-1 DR), Pulumi for IaC,
+  GitHub Actions for CI, Docker images pushed to ECR.
+- Observability: Datadog for metrics + APM, Sentry for errors,
+  PagerDuty for alerting.
+
+Branching and reviews
+---------------------
+- Trunk-based on `main`. No long-lived feature branches.
+- Every PR needs at least one approving review and green CI before merge.
+- PRs that touch `services/billing/` or `services/orders/` need TWO reviews,
+  at least one from a senior engineer.
+- Squash-merge only. The PR title becomes the commit message.
+
+Deploys
+-------
+- CI runs on every push: ruff, mypy --strict, pytest with 80% coverage gate.
+- Merging to `main` triggers a deploy to staging within ~6 minutes.
+- Production deploys are manual via the `deploy-prod` workflow. Any engineer
+  can trigger; the on-call engineer must ack within 15 minutes.
+- Deploys are blocked Friday after 3pm PT and the entire weekend, except
+  for sev1/sev2 incident fixes (requires VP approval).
+
+Incident response
+-----------------
+- All sev1 + sev2 incidents must page the on-call via PagerDuty.
+- Time-to-acknowledge target: 5 minutes.
+- Time-to-mitigate target: 30 minutes for sev1, 2 hours for sev2.
+- Postmortems are required within 5 business days. Template at
+  /docs/postmortem-template.md. They are blameless and shared
+  in #incidents-public.
+
+Security basics
+---------------
+- Customer data (email, address, payment metadata) lives only in the
+  `customers` and `subscriptions` tables. Never log PII.
+- Stripe keys, AWS creds, and DB passwords live in AWS Secrets Manager.
+  Never commit secrets — pre-commit hook runs trufflehog.
+- All employees use SSO via Okta + hardware MFA (YubiKey).
+
+On-call
+-------
+- Rotation is weekly, Monday 9am PT to Monday 9am PT.
+- Primary + secondary, both engineers. Secondary covers if primary is
+  unreachable for >15 minutes.
+- Compensation: $750/week for primary, $250/week for secondary, plus
+  comp time for any page outside 9-5 PT.
