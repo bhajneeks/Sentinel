@@ -50,6 +50,14 @@ PROFILE_ENV_VAR_BY_PLATFORM: dict[ConvexPlatform, str] = {
 
 IDLE_CLOSE_AFTER_S = 30 * 60  # 30 minutes
 HARVEST_INTERVAL_S = 45.0
+ENERGY_MAX = 100.0
+ENERGY_TICK_DECAY = 4.0          # baseline drain per harvest tick
+ENERGY_NO_YIELD_DRAIN = 6.0      # extra drain when a tick yields zero new approved FOUND
+ENERGY_BAD_URL_DRAIN = 35.0      # captcha / login / blocked → fast drain to 0
+ENERGY_BAD_EVAL_DRAIN = 12.0     # negative evaluation_previous_goal text
+ENERGY_LOOP_DRAIN = 8.0          # repeating same next_goal
+ENERGY_REFILL_ON_HIT = ENERGY_MAX  # full refill on judge-approved FOUND
+MAX_RESTARTS = 3                 # before close
 
 
 @dataclass
@@ -70,6 +78,11 @@ class AgentHandle:
     seen_post_urls: set[str] = field(default_factory=set)
     rejected_post_urls: set[str] = field(default_factory=set)
     harvest_task: asyncio.Task[None] | None = None
+    # Self-healing energy state.
+    energy: float = ENERGY_MAX
+    restart_count: int = 0
+    recent_next_goals: list[str] = field(default_factory=list)
+    last_energy_write_at: float = 0.0
 
     def touch(self) -> None:
         self.last_active_at = time.time()
@@ -212,6 +225,184 @@ async def _push_insight(
                 logger.warning("dashboard echo failed: %s", exc)
 
 
+_BAD_URL_KEYWORDS = (
+    "captcha", "challenge", "verify", "login", "signin", "sign-in",
+    "signup", "sign-up", "auth", "blocked", "denied", "checkpoint",
+    "consent", "x.com/i/flow", "linkedin.com/checkpoint",
+)
+_BAD_EVAL_KEYWORDS = (
+    "could not", "failed to", "blocked", "not visible", "unable to",
+    "no way to", "stuck", "cannot proceed", "cannot find", "did not find",
+    "couldn't find", "unable to dismiss", "unable to scroll",
+)
+
+
+def _step_signature(step: Any) -> str:
+    val = getattr(step, "next_goal", None)
+    return (val or "")[:160].lower().strip()
+
+
+def _energy_delta_for_step(handle: AgentHandle, step: Any) -> float:
+    """Diagnose a single step. Returns a negative delta to apply to energy."""
+    delta = 0.0
+    url = (getattr(step, "url", "") or "").lower()
+    eval_prev = (getattr(step, "evaluation_previous_goal", "") or "").lower()
+
+    if any(k in url for k in _BAD_URL_KEYWORDS):
+        delta -= ENERGY_BAD_URL_DRAIN
+
+    if any(k in eval_prev for k in _BAD_EVAL_KEYWORDS):
+        delta -= ENERGY_BAD_EVAL_DRAIN
+
+    sig = _step_signature(step)
+    if sig and sig in handle.recent_next_goals:
+        delta -= ENERGY_LOOP_DRAIN
+    if sig:
+        handle.recent_next_goals.append(sig)
+        handle.recent_next_goals = handle.recent_next_goals[-5:]
+
+    return delta
+
+
+async def _maybe_write_energy(handle: AgentHandle) -> None:
+    """Debounced Convex energy write — at most once per ~10s per handle."""
+    now = time.time()
+    if now - handle.last_energy_write_at < 10:
+        return
+    handle.last_energy_write_at = now
+    try:
+        await cx.patch_supervised(handle.convex_session_id, energy=handle.energy)
+    except Exception as exc:
+        logger.debug("energy write failed: %s", exc)
+
+
+_REVIVE_SYSTEM = (
+    "You are a self-healing supervisor for a stuck browser agent. Read "
+    "the recent step trace and propose a NEW task instruction that gets "
+    "the agent unstuck. Respond with valid JSON only."
+)
+
+
+def _revive_prompt(handle: AgentHandle, recent_steps: list[Any]) -> str:
+    trace_lines: list[str] = []
+    for s in recent_steps:
+        trace_lines.append(
+            f"step {getattr(s, 'number', '?')}: "
+            f"url={(getattr(s, 'url', '') or '')[:140]} | "
+            f"eval={(getattr(s, 'evaluation_previous_goal', '') or '')[:200]} | "
+            f"next={(getattr(s, 'next_goal', '') or '')[:200]}"
+        )
+    trace = "\n".join(trace_lines) or "(no recent steps recorded)"
+    return (
+        f"Platform: {handle.platform}\n"
+        f"Company being tracked: {handle.company}\n"
+        f"Restart attempt #{handle.restart_count + 1} of {MAX_RESTARTS}.\n\n"
+        f"Current task (truncated to 700 chars):\n{handle.current_task_text[:700]}\n\n"
+        f"Recent step trace (oldest first):\n{trace}\n\n"
+        "Diagnose what went wrong and propose a NEW task instruction. "
+        "Requirements for the new task:\n"
+        f" - Continues monitoring '{handle.company}' on {handle.platform}.\n"
+        " - Avoids the failure mode (different start URL if stuck on captcha; "
+        "different scroll mechanic if loop-stuck; different selector strategy "
+        "if elements not found).\n"
+        " - PRESERVES the FOUND format requirement: agent must emit\n"
+        "       FOUND | <full_post_url> | <author> | <one-sentence opinion summary>\n"
+        "   one line per qualifying post.\n"
+        " - Keeps the quality bar: only opinion-bearing posts explicitly "
+        "about the company.\n\n"
+        "Respond with valid JSON:\n"
+        '  {"diagnosis": "<one-sentence diagnosis of why energy hit zero>", '
+        '"new_task": "<the full new task instruction, plain text>"}\n'
+        "JSON object only, no prose."
+    )
+
+
+async def _diagnose_and_revive(handle: AgentHandle, recent_steps: list[Any]) -> bool:
+    """LLM diagnoses the stuck agent and queues a revised task on the same
+    session. Returns True if revive succeeded, False if we gave up."""
+    if handle.restart_count >= MAX_RESTARTS:
+        logger.warning(
+            "supervised %s exhausted restarts (%d) — closing",
+            handle.platform, handle.restart_count,
+        )
+        try:
+            await cx.patch_supervised(
+                handle.convex_session_id,
+                energy=0,
+                last_diagnosis="max restarts exhausted",
+            )
+        except Exception:
+            pass
+        try:
+            await _close_handle(handle)
+        finally:
+            _registry.get(handle.participant, {}).pop(handle.platform, None)  # type: ignore[arg-type]
+        return False
+
+    diagnosis = "stuck (default)"
+    new_task = handle.current_task_text  # fallback: rerun the same task
+    try:
+        import agent
+        if agent.is_configured():
+            raw = await agent.chat_completion(
+                messages=[
+                    {"role": "system", "content": _REVIVE_SYSTEM},
+                    {"role": "user", "content": _revive_prompt(handle, recent_steps)},
+                ],
+                max_tokens=900,
+                temperature=0.4,
+                response_format={"type": "json_object"},
+            )
+            parsed = json.loads(raw)
+            diagnosis = (parsed.get("diagnosis") or diagnosis).strip()
+            candidate = (parsed.get("new_task") or "").strip()
+            if candidate:
+                new_task = candidate
+    except Exception as exc:
+        logger.warning("revive LLM failed for %s: %s", handle.platform, exc)
+
+    logger.info(
+        "supervised revive %s (attempt %d): %s",
+        handle.platform, handle.restart_count + 1, diagnosis,
+    )
+
+    client = make_client()
+    try:
+        await client.tasks.update_task(handle.current_task_id, action="stop")
+    except Exception as exc:
+        logger.warning("revive stop-task failed: %s", exc)
+
+    try:
+        task_resp = await client.tasks.create_task(
+            task=new_task,
+            session_id=handle.cloud_session_id,
+        )
+    except Exception as exc:
+        logger.warning("revive create_task failed for %s: %s", handle.platform, exc)
+        return False
+
+    handle.current_task_id = task_resp.id
+    handle.current_task_text = new_task
+    handle.last_step_seen = 0
+    handle.recent_next_goals.clear()
+    handle.energy = ENERGY_MAX
+    handle.restart_count += 1
+    handle.last_energy_write_at = 0.0  # force immediate energy write below
+
+    try:
+        await cx.patch_supervised(
+            handle.convex_session_id,
+            energy=handle.energy,
+            restart_count=handle.restart_count,
+            last_diagnosis=diagnosis,
+        )
+        await cx.update_session_query(handle.convex_session_id, new_task[:200])
+    except Exception as exc:
+        logger.debug("revive convex patch failed: %s", exc)
+
+    return True
+
+
 async def _harvest_loop(handle: AgentHandle, interval: float = HARVEST_INTERVAL_S) -> None:
     """Per-handle background task. Polls get_task(), extracts FOUND lines,
     keyword-filters, writes Convex mentions. Idempotent via seen_post_urls.
@@ -228,7 +419,26 @@ async def _harvest_loop(handle: AgentHandle, interval: float = HARVEST_INTERVAL_
 
             steps = list(task.steps or [])
             new_steps = [s for s in steps if int(getattr(s, "number", 0) or 0) > handle.last_step_seen]
+
+            # baseline tick decay (always)
+            handle.energy = max(0.0, handle.energy - ENERGY_TICK_DECAY)
+
+            # per-step diagnostics
+            for step in new_steps:
+                handle.energy = max(
+                    0.0, handle.energy + _energy_delta_for_step(handle, step)
+                )
+
+            ticked_anything_useful = False  # set True if a judge-approved post lands
+
             if not new_steps:
+                # no progress at all this tick → extra drain
+                handle.energy = max(0.0, handle.energy - ENERGY_NO_YIELD_DRAIN)
+                await _maybe_write_energy(handle)
+                if handle.energy <= 0:
+                    revived = await _diagnose_and_revive(handle, steps[-5:])
+                    if not revived:
+                        return
                 continue
 
             for step in new_steps:
@@ -270,6 +480,8 @@ async def _harvest_loop(handle: AgentHandle, interval: float = HARVEST_INTERVAL_
                         continue
 
                     handle.seen_post_urls.add(url)
+                    ticked_anything_useful = True
+                    handle.energy = ENERGY_REFILL_ON_HIT  # full reset on a real hit
 
                     if handle.run_id:
                         try:
@@ -300,6 +512,18 @@ async def _harvest_loop(handle: AgentHandle, interval: float = HARVEST_INTERVAL_
             handle.last_step_seen = max(
                 int(getattr(s, "number", 0) or 0) for s in new_steps
             )
+
+            if not ticked_anything_useful:
+                # steps progressed but nothing made it through the judge →
+                # extra drain on top of step-level signals
+                handle.energy = max(0.0, handle.energy - ENERGY_NO_YIELD_DRAIN)
+
+            await _maybe_write_energy(handle)
+
+            if handle.energy <= 0:
+                revived = await _diagnose_and_revive(handle, steps[-5:])
+                if not revived:
+                    return
         except asyncio.CancelledError:
             return
         except Exception as exc:  # pragma: no cover — defensive
@@ -590,6 +814,14 @@ async def _start_one(
         run_id=run_id,
         company=company,
     )
+    # Seed Convex with the initial energy so the dashboard can render
+    # the bar immediately (otherwise it'd remain null until the first
+    # debounced write ~10s in).
+    try:
+        await cx.patch_supervised(handle.convex_session_id, energy=handle.energy)
+    except Exception:
+        pass
+
     if start_harvester:
         handle.harvest_task = asyncio.create_task(_harvest_loop(handle))
     return handle

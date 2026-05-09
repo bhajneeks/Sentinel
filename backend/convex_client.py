@@ -131,6 +131,27 @@ async def update_session_query(session_id: str, query: str) -> None:
     })
 
 
+async def patch_supervised(
+    session_id: str,
+    *,
+    energy: float | None = None,
+    restart_count: int | None = None,
+    last_diagnosis: str | None = None,
+) -> None:
+    """Patch self-healing fields on a supervised session row."""
+    args: dict[str, Any] = {"sessionId": session_id}
+    if energy is not None:
+        args["energy"] = energy
+    if restart_count is not None:
+        args["restartCount"] = restart_count
+    if last_diagnosis is not None:
+        args["lastDiagnosis"] = last_diagnosis
+    if len(args) == 1:
+        return  # nothing to patch
+    client = get_client()
+    await _run(client.mutation, "sessions:patchSupervised", args)
+
+
 async def active_browser_count() -> int:
     client = get_client()
     raw = await _run(client.query, "sessions:activeBrowserCount", {})

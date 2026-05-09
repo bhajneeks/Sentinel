@@ -76,6 +76,9 @@ type LiveSession = {
   startedAt?: number;
   participant?: string | null;
   cloudSessionId?: string | null;
+  energy?: number | null;
+  restartCount?: number;
+  lastDiagnosis?: string | null;
 };
 
 type AgentSceneProps = {
@@ -142,6 +145,38 @@ type LineHandle = {
 
 const FLOAT_X_AMP = 0.06;
 const FLOAT_Y_AMP = 0.08;
+
+function EnergyPill({
+  energy,
+  restartCount = 0,
+}: {
+  energy: number;
+  restartCount?: number;
+}) {
+  const clamped = Math.max(0, Math.min(100, energy));
+  const color = clamped > 60 ? "#34d399" : clamped > 25 ? "#fbbf24" : "#fb7185";
+  return (
+    <span className="ml-1 flex items-center gap-1">
+      <span
+        className="block h-1 w-10 overflow-hidden rounded-full bg-zinc-800/80 ring-1 ring-white/10"
+        title={`energy ${Math.round(clamped)}%${restartCount ? ` · revives ${restartCount}` : ""}`}
+      >
+        <span
+          className="block h-full transition-[width] duration-500"
+          style={{ width: `${clamped}%`, background: color }}
+        />
+      </span>
+      <span style={{ color }} className="font-semibold">
+        {Math.round(clamped)}
+      </span>
+      {restartCount > 0 ? (
+        <span className="rounded-full bg-violet-500/20 px-1 text-violet-300 ring-1 ring-violet-400/30">
+          r{restartCount}
+        </span>
+      ) : null}
+    </span>
+  );
+}
 
 function PlatformAssembly({
   platform,
@@ -279,6 +314,9 @@ function BrowserChrome({
             </span>
           ) : null}
           {addressText}
+          {live && typeof live.energy === "number" ? (
+            <EnergyPill energy={live.energy} restartCount={live.restartCount} />
+          ) : null}
         </div>
       </Html>
 

@@ -71,6 +71,27 @@ export const updateQuery = mutation({
   },
 });
 
+/** Patch the supervised-agent self-healing state on a session. All
+ * fields optional — pass only what changed. The harvest loop calls
+ * this every ~10s with new energy levels, and on revive with a new
+ * diagnosis + bumped restartCount. */
+export const patchSupervised = mutation({
+  args: {
+    sessionId: v.id("scraperSessions"),
+    energy: v.optional(v.number()),
+    restartCount: v.optional(v.number()),
+    lastDiagnosis: v.optional(v.string()),
+  },
+  handler: async (ctx, { sessionId, energy, restartCount, lastDiagnosis }) => {
+    const patch: Record<string, unknown> = {};
+    if (energy !== undefined) patch.energy = energy;
+    if (restartCount !== undefined) patch.restartCount = restartCount;
+    if (lastDiagnosis !== undefined) patch.lastDiagnosis = lastDiagnosis;
+    if (Object.keys(patch).length === 0) return;
+    await ctx.db.patch(sessionId, patch);
+  },
+});
+
 export const byRun = query({
   args: { runId: v.id("agentRuns") },
   handler: async (ctx, { runId }) => {
@@ -123,6 +144,9 @@ export const activeCloud = query({
         startedAt: s.startedAt,
         participant: s.participant ?? null,
         cloudSessionId: s.cloudSessionId ?? null,
+        energy: s.energy ?? null,
+        restartCount: s.restartCount ?? 0,
+        lastDiagnosis: s.lastDiagnosis ?? null,
       }));
   },
 });

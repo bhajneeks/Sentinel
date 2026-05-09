@@ -60,6 +60,15 @@ export default defineSchema({
     /** iMessage participant (phone number / Apple ID) the session belongs to.
      * Used to scope the dashboard view to the active conversation. */
     participant: v.optional(v.string()),
+    /** Self-healing energy level (0-100). Depletes when the agent is
+     * stuck / confused / hits a captcha; refills when a judge-approved
+     * FOUND lands. At 0, the supervisor diagnoses and redirects. */
+    energy: v.optional(v.number()),
+    /** How many times this session has been auto-revived. Capped at 3
+     * before the session is closed. */
+    restartCount: v.optional(v.number()),
+    /** Last LLM-generated diagnosis explaining why energy hit 0. */
+    lastDiagnosis: v.optional(v.string()),
   })
     .index("by_run", ["runId"])
     .index("by_status", ["status"])
