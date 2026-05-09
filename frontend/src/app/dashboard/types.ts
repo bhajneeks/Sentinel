@@ -1,6 +1,6 @@
 export type Direction = "inbound" | "outbound";
 export type ChatKind = "dm" | "group" | "unknown";
-export type Platform = "reddit" | "x" | "linkedin";
+export type Platform = "reddit" | "x" | "linkedin" | "tiktok";
 
 export type MentionPayload = {
   platform: Platform;

@@ -159,9 +159,11 @@ function Bubble({
   );
 }
 
+type PlatformMeta = { label: string; color: string; glyph: string; host: string };
+
 const PLATFORM_META: Record<
   NonNullable<Message["mention"]>["platform"],
-  { label: string; color: string; glyph: string; host: string }
+  PlatformMeta
 > = {
   reddit: {
     label: "Reddit",
@@ -176,6 +178,19 @@ const PLATFORM_META: Record<
     glyph: "in",
     host: "linkedin.com",
   },
+  tiktok: {
+    label: "TikTok",
+    color: "#ff0050",
+    glyph: "♪",
+    host: "tiktok.com",
+  },
+};
+
+const FALLBACK_META: PlatformMeta = {
+  label: "Source",
+  color: "#a78bfa",
+  glyph: "·",
+  host: "browser-use.com",
 };
 
 function MentionBubble({
