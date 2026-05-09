@@ -31,6 +31,7 @@ from reacher import (  # noqa: E402  -- must come after load_dotenv()
     get_competitor_landscape,
     get_trending_videos,
 )
+from scraper import scrape_x, scrape_linkedin, scrape_reddit, Mention  # noqa: E402
 
 logger = logging.getLogger("uvicorn.error")
 
@@ -322,3 +323,25 @@ async def stream_messages(request: Request):
 @app.get("/api/agent/status")
 def agent_status():
     return {"configured": agent.is_configured()}
+
+
+class ScrapeRequest(BaseModel):
+    brand_terms: list[str]
+    lookback_minutes: int = 60
+    seen_ids: list[str] = []
+
+
+class ScrapeResponse(BaseModel):
+    mentions: list[Mention]
+
+
+@app.post("/api/scrape")
+async def scrape(req: ScrapeRequest) -> ScrapeResponse:
+    seen = set(req.seen_ids)
+    results = await asyncio.gather(
+        scrape_x(req.brand_terms, req.lookback_minutes, seen),
+        scrape_linkedin(req.brand_terms, req.lookback_minutes, seen),
+        scrape_reddit(req.brand_terms, req.lookback_minutes, seen),
+    )
+    mentions = [m for batch in results for m in batch]
+    return ScrapeResponse(mentions=mentions)
