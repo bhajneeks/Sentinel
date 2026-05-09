@@ -1,9 +1,12 @@
 # Python
 backend/.venv/
+backend/.env
+backend/auth/
 backend/__pycache__/
 backend/**/__pycache__/
 backend/**/*.pyc
 backend/.env
+backend/.env*.local
 
 # Node / Next.js
 frontend/node_modules/
@@ -11,9 +14,12 @@ frontend/.next/
 frontend/out/
 frontend/.env*.local
 
+# Bridge (Bun)
+bridge/node_modules/
+bridge/.env*.local
+
 # OS
 .DS_Store
 
 # Nia pipeline state (contains source IDs tied to your account)
 pipeline.json
-
