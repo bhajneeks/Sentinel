@@ -4,15 +4,12 @@ from __future__ import annotations
 
 import os
 from collections.abc import Iterable
+from pathlib import Path
 
 from openai import AsyncOpenAI
 
-SYSTEM_PROMPT = (
-    "You are a friendly, concise assistant replying to text messages on behalf "
-    "of the user. Keep replies under two short sentences, casual, and direct. "
-    "Never claim to be human; if asked, say you're an AI assistant relaying "
-    "messages. Match the tone of the incoming message."
-)
+_PROMPT_PATH = Path(__file__).parent / "prompt.md"
+SYSTEM_PROMPT = _PROMPT_PATH.read_text(encoding="utf-8")
 
 _client: AsyncOpenAI | None = None
 

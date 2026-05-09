@@ -1,5 +1,6 @@
 "use client";
 
+import { maskParticipant } from "../format";
 import type { Conversation } from "../types";
 
 type Props = {
@@ -53,13 +54,13 @@ export default function Tabs({
                 }`}
               />
               <span className="font-medium tabular-nums">
-                {truncate(conv.participant)}
+                {truncate(maskParticipant(conv.participant))}
               </span>
               <span className="text-xs text-zinc-500">{conv.messageCount}</span>
             </button>
             <button
               type="button"
-              aria-label={`Close ${conv.participant}`}
+              aria-label={`Close ${maskParticipant(conv.participant)}`}
               onClick={() => onClose(conv.participant)}
               className="flex h-5 w-5 items-center justify-center rounded text-zinc-500 opacity-0 transition-opacity hover:bg-white/10 hover:text-zinc-200 group-hover:opacity-100 data-[active=true]:opacity-100"
               data-active={isActive}

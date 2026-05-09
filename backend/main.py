@@ -13,6 +13,7 @@ from pydantic import BaseModel
 from sse_starlette.sse import EventSourceResponse
 
 import agent
+import imessage
 
 load_dotenv(".env.local")
 load_dotenv()  # fallback to .env
@@ -78,7 +79,10 @@ def conversation_history(participant: str, limit: int) -> list[tuple[str, str]]:
     return out[-limit:]
 
 
-async def _generate_and_broadcast(participant: str) -> None:
+async def _generate_and_broadcast(source: Message) -> None:
+    participant = source.participant
+    if not participant:
+        return
     history = conversation_history(participant, HISTORY_FOR_REPLY)
     if not history:
         return
@@ -89,18 +93,22 @@ async def _generate_and_broadcast(participant: str) -> None:
         return
     if not reply_text:
         return
-    reply = Message(
-        id=f"agent-{uuid.uuid4().hex[:12]}",
-        text=reply_text,
-        participant=participant,
-        chatId=None,
-        chatKind="dm",
-        service="agent",
-        createdAt=datetime.now(timezone.utc),
-        direction="outbound",
-    )
-    messages.append(reply)
-    broadcast(reply)
+
+    fragments = [p.strip() for p in reply_text.split("||") if p.strip()]
+    for fragment in fragments:
+        await imessage.send(participant, fragment, source.service)
+        reply = Message(
+            id=f"agent-{uuid.uuid4().hex[:12]}",
+            text=fragment,
+            participant=participant,
+            chatId=source.chatId,
+            chatKind="dm",
+            service=source.service or "iMessage",
+            createdAt=datetime.now(timezone.utc),
+            direction="outbound",
+        )
+        messages.append(reply)
+        broadcast(reply)
 
 
 @app.get("/api/hello")
@@ -159,9 +167,10 @@ async def ingest_message(message: Message):
     if (
         message.direction == "inbound"
         and message.participant
+        and message.chatKind != "group"
         and agent.is_configured()
     ):
-        asyncio.create_task(_generate_and_broadcast(message.participant))
+        asyncio.create_task(_generate_and_broadcast(message))
 
 
 @app.get("/api/messages/stream")

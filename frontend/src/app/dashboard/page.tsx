@@ -110,12 +110,11 @@ export default function Dashboard() {
   }, []);
 
   useEffect(() => {
-    const source = new EventSource(`${API_URL}/api/messages/stream`);
+    let source: EventSource | null = null;
+    let retryTimer: ReturnType<typeof setTimeout> | null = null;
+    let cancelled = false;
 
-    source.addEventListener("open", () => setStatus("open"));
-    source.addEventListener("error", () => setStatus("closed"));
-
-    source.addEventListener("snapshot", (event) => {
+    const handleSnapshot = (event: Event) => {
       const batch = JSON.parse((event as MessageEvent).data) as Message[];
       const fresh = batch.filter((m) => {
         if (seenIds.current.has(m.id)) return false;
@@ -142,16 +141,43 @@ export default function Dashboard() {
         );
         return first?.participant ?? null;
       });
-    });
+    };
 
-    source.addEventListener("message", (event) => {
+    const handleMessage = (event: MessageEvent) => {
       const incoming = JSON.parse(event.data) as Message;
       upsertMessage(incoming);
       setActiveParticipant((prev) => prev ?? incoming.participant ?? null);
-    });
+    };
+
+    const connect = () => {
+      if (cancelled) return;
+      setStatus("connecting");
+      const next = new EventSource(`${API_URL}/api/messages/stream`);
+      source = next;
+
+      next.addEventListener("open", () => setStatus("open"));
+      next.addEventListener("snapshot", handleSnapshot);
+      next.addEventListener("message", handleMessage);
+      next.addEventListener("error", () => {
+        if (next.readyState === EventSource.CLOSED) {
+          setStatus("closed");
+          next.close();
+          if (source === next) source = null;
+          if (!cancelled) {
+            retryTimer = setTimeout(connect, 2000);
+          }
+        } else {
+          setStatus("connecting");
+        }
+      });
+    };
+
+    connect();
 
     return () => {
-      source.close();
+      cancelled = true;
+      if (retryTimer) clearTimeout(retryTimer);
+      if (source) source.close();
       for (const timer of thinkingTimers.current.values()) clearTimeout(timer);
       thinkingTimers.current.clear();
     };
@@ -218,7 +244,7 @@ export default function Dashboard() {
         </div>
 
         <div className="flex flex-1 overflow-hidden">
-          <section className="flex w-[55%] flex-col border-white/5 border-r bg-gradient-to-b from-black/20 to-black/10">
+          <section className="flex w-[340px] shrink-0 flex-col border-white/5 border-r">
             <ChatThread
               messages={messages}
               participant={activeParticipant}
@@ -330,13 +356,13 @@ function SceneOverlay() {
     <div className="pointer-events-none absolute inset-0 flex flex-col justify-between p-4">
       <div className="flex items-center justify-between">
         <div className="flex flex-col gap-0.5">
-          <div className="font-mono text-[10px] text-violet-300/60 uppercase tracking-[0.2em]">
-            Agent Mesh
+          <div className="font-mono text-[10px] text-violet-300/60 uppercase tracking-[0.25em]">
+            Browser fleet
           </div>
-          <div className="font-medium text-sm text-white/90">Browser swarm</div>
+          <div className="font-medium text-sm text-white/90">Live scrape network</div>
         </div>
         <div className="rounded-full bg-black/40 px-2.5 py-1 font-mono text-[10px] text-zinc-400 ring-1 ring-white/10 backdrop-blur">
-          3 nodes · idle
+          3 browsers · idle
         </div>
       </div>
       <div className="flex items-end justify-between font-mono text-[10px] text-zinc-500">

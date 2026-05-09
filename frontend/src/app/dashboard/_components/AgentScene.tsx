@@ -1,19 +1,18 @@
 "use client";
 
-import { Float, Html, OrbitControls, Stars } from "@react-three/drei";
+import { Billboard, Float, Html, Line, OrbitControls, RoundedBox, Stars } from "@react-three/drei";
 import { Canvas, useFrame } from "@react-three/fiber";
-import { useMemo, useRef } from "react";
+import { useRef } from "react";
 import * as THREE from "three";
 
 type Platform = {
   id: string;
   label: string;
+  url: string;
   initial: string;
   color: string;
   emissive: string;
-  orbitRadius: number;
-  orbitSpeed: number;
-  orbitTilt: number;
+  position: [number, number, number];
   phase: number;
 };
 
@@ -21,35 +20,32 @@ const PLATFORMS: Platform[] = [
   {
     id: "reddit",
     label: "Reddit",
+    url: "reddit.com",
     initial: "R",
     color: "#ff4500",
     emissive: "#ff7849",
-    orbitRadius: 3.0,
-    orbitSpeed: 0.18,
-    orbitTilt: 0.25,
+    position: [-3.6, 0.6, 0.3],
     phase: 0,
   },
   {
     id: "x",
     label: "X",
+    url: "x.com",
     initial: "𝕏",
-    color: "#e2e8f0",
-    emissive: "#94a3b8",
-    orbitRadius: 4.2,
-    orbitSpeed: 0.12,
-    orbitTilt: -0.45,
-    phase: 2.1,
+    color: "#ffffff",
+    emissive: "#cbd5e1",
+    position: [0, -1.4, 1.6],
+    phase: 1.7,
   },
   {
     id: "linkedin",
     label: "LinkedIn",
+    url: "linkedin.com",
     initial: "in",
     color: "#0a66c2",
     emissive: "#3b82f6",
-    orbitRadius: 3.6,
-    orbitSpeed: 0.22,
-    orbitTilt: 0.55,
-    phase: 4.3,
+    position: [3.6, 0.6, 0.3],
+    phase: 3.4,
   },
 ];
 
@@ -69,10 +65,10 @@ function CoreNode() {
   });
 
   return (
-    <Float speed={1.2} rotationIntensity={0} floatIntensity={0.3}>
+    <Float speed={1.2} rotationIntensity={0} floatIntensity={0.25}>
       <group>
         <mesh ref={meshRef}>
-          <icosahedronGeometry args={[1.1, 1]} />
+          <icosahedronGeometry args={[0.95, 1]} />
           <meshStandardMaterial
             color="#1e1b4b"
             emissive="#8b5cf6"
@@ -83,19 +79,19 @@ function CoreNode() {
           />
         </mesh>
         <mesh ref={innerRef}>
-          <icosahedronGeometry args={[0.7, 0]} />
+          <icosahedronGeometry args={[0.55, 0]} />
           <meshStandardMaterial
             color="#a78bfa"
             emissive="#c4b5fd"
-            emissiveIntensity={1.2}
+            emissiveIntensity={1.3}
             metalness={0.9}
             roughness={0.1}
           />
         </mesh>
         <pointLight color="#a78bfa" intensity={2} distance={8} />
-        <Html center distanceFactor={10} position={[0, -1.7, 0]}>
-          <div className="pointer-events-none whitespace-nowrap text-center font-mono text-[10px] text-violet-200/80 tracking-widest uppercase">
-            Spectrum Core
+        <Html center distanceFactor={10} position={[0, -1.5, 0]}>
+          <div className="pointer-events-none whitespace-nowrap text-center font-mono text-[10px] text-violet-200/80 tracking-[0.25em] uppercase">
+            Orchestrator
           </div>
         </Html>
       </group>
@@ -103,137 +99,243 @@ function CoreNode() {
   );
 }
 
-function PlatformNode({ platform }: { platform: Platform }) {
+function BrowserWindow({ platform }: { platform: Platform }) {
   const groupRef = useRef<THREE.Group>(null);
-  const lineRef = useRef<THREE.Mesh>(null);
-  const positionRef = useRef(new THREE.Vector3());
 
   useFrame((state) => {
-    const t = state.clock.elapsedTime * platform.orbitSpeed + platform.phase;
-    const x = Math.cos(t) * platform.orbitRadius;
-    const z = Math.sin(t) * platform.orbitRadius;
-    const y = Math.sin(t * 0.7) * platform.orbitRadius * platform.orbitTilt;
-    positionRef.current.set(x, y, z);
-    if (groupRef.current) {
-      groupRef.current.position.copy(positionRef.current);
-    }
-    if (lineRef.current) {
-      const length = positionRef.current.length();
-      lineRef.current.scale.set(1, length, 1);
-      lineRef.current.position.set(x / 2, y / 2, z / 2);
-      lineRef.current.lookAt(positionRef.current);
-      lineRef.current.rotateX(Math.PI / 2);
-    }
+    if (!groupRef.current) return;
+    const t = state.clock.elapsedTime;
+    groupRef.current.position.y =
+      platform.position[1] + Math.sin(t * 0.7 + platform.phase) * 0.12;
+    groupRef.current.position.x =
+      platform.position[0] + Math.cos(t * 0.5 + platform.phase) * 0.08;
   });
 
   return (
-    <>
-      <mesh ref={lineRef}>
-        <cylinderGeometry args={[0.008, 0.008, 1, 6]} />
-        <meshBasicMaterial color={platform.color} transparent opacity={0.25} />
-      </mesh>
+    <Billboard
+      follow
+      lockX={false}
+      lockY={false}
+      lockZ={false}
+      position={platform.position}
+    >
       <group ref={groupRef}>
-        <mesh>
-          <sphereGeometry args={[0.32, 32, 32]} />
-          <meshStandardMaterial
-            color={platform.color}
-            emissive={platform.emissive}
-            emissiveIntensity={0.7}
-            metalness={0.4}
-            roughness={0.3}
-          />
-        </mesh>
-        <mesh>
-          <sphereGeometry args={[0.42, 32, 32]} />
-          <meshBasicMaterial
-            color={platform.emissive}
-            transparent
-            opacity={0.12}
-          />
-        </mesh>
-        <Html center distanceFactor={8} position={[0, 0.6, 0]}>
-          <div className="pointer-events-none whitespace-nowrap rounded-full bg-black/40 px-2 py-0.5 text-[10px] text-white/90 backdrop-blur-md ring-1 ring-white/10">
-            <span className="mr-1 font-bold" style={{ color: platform.color }}>
-              {platform.initial}
-            </span>
-            {platform.label}
-          </div>
-        </Html>
+        <BrowserChrome platform={platform} />
       </group>
+    </Billboard>
+  );
+}
+
+function BrowserChrome({ platform }: { platform: Platform }) {
+  const screenRef = useRef<THREE.Mesh>(null);
+
+  useFrame((state) => {
+    if (!screenRef.current) return;
+    const mat = screenRef.current.material as THREE.MeshStandardMaterial;
+    mat.emissiveIntensity =
+      0.35 + Math.sin(state.clock.elapsedTime * 1.2 + platform.phase) * 0.08;
+  });
+
+  return (
+    <group>
+      {/* glow halo behind */}
+      <mesh position={[0, 0, -0.04]}>
+        <planeGeometry args={[2.2, 1.55]} />
+        <meshBasicMaterial color={platform.emissive} transparent opacity={0.14} />
+      </mesh>
+
+      {/* body */}
+      <RoundedBox args={[1.9, 1.25, 0.06]} radius={0.06} smoothness={4}>
+        <meshStandardMaterial
+          color="#0b0a18"
+          metalness={0.6}
+          roughness={0.35}
+          emissive="#1a1530"
+          emissiveIntensity={0.15}
+        />
+      </RoundedBox>
+
+      {/* title bar */}
+      <mesh position={[0, 0.52, 0.032]}>
+        <planeGeometry args={[1.86, 0.18]} />
+        <meshStandardMaterial color="#15132a" emissive="#15132a" emissiveIntensity={0.4} />
+      </mesh>
+
+      {/* traffic lights */}
+      <TrafficLight position={[-0.82, 0.52, 0.034]} color="#ff5f57" />
+      <TrafficLight position={[-0.74, 0.52, 0.034]} color="#febc2e" />
+      <TrafficLight position={[-0.66, 0.52, 0.034]} color="#28c840" />
+
+      {/* address pill */}
+      <mesh position={[0.2, 0.52, 0.034]}>
+        <planeGeometry args={[1, 0.1]} />
+        <meshBasicMaterial color="#0a0915" transparent opacity={0.85} />
+      </mesh>
+      <Html
+        center
+        distanceFactor={3.5}
+        position={[0.2, 0.52, 0.045]}
+        occlude={false}
+      >
+        <div className="pointer-events-none whitespace-nowrap font-mono text-[8px] text-zinc-400 tracking-wider">
+          {platform.url}
+        </div>
+      </Html>
+
+      {/* screen content panel */}
+      <mesh ref={screenRef} position={[0, -0.085, 0.032]}>
+        <planeGeometry args={[1.86, 1.0]} />
+        <meshStandardMaterial
+          color={platform.color}
+          emissive={platform.emissive}
+          emissiveIntensity={0.4}
+          metalness={0.2}
+          roughness={0.5}
+        />
+      </mesh>
+
+      {/* content rows simulating page content */}
+      <ContentRows color={platform.emissive} />
+
+      {/* big platform glyph */}
+      <Html
+        center
+        distanceFactor={5}
+        position={[0, -0.085, 0.05]}
+        occlude={false}
+      >
+        <div
+          className="pointer-events-none flex select-none flex-col items-center gap-1 font-bold text-white"
+          style={{ textShadow: `0 0 20px ${platform.emissive}` }}
+        >
+          <span className="text-4xl leading-none">{platform.initial}</span>
+          <span className="font-mono text-[9px] uppercase tracking-[0.3em] opacity-80">
+            {platform.label}
+          </span>
+        </div>
+      </Html>
+    </group>
+  );
+}
+
+function ContentRows({ color }: { color: string }) {
+  const rows: { y: number; w: number }[] = [
+    { y: -0.42, w: 1.6 },
+    { y: -0.5, w: 1.2 },
+  ];
+  return (
+    <>
+      {rows.map((r) => (
+        <mesh
+          key={`row-${r.y.toFixed(2)}-${r.w.toFixed(2)}`}
+          position={[(r.w - 1.7) / 2, r.y, 0.034]}
+        >
+          <planeGeometry args={[r.w, 0.04]} />
+          <meshBasicMaterial color={color} transparent opacity={0.35} />
+        </mesh>
+      ))}
     </>
   );
 }
 
-function OrbitRings() {
-  const ringRefs = useRef<(THREE.Mesh | null)[]>([]);
+function TrafficLight({
+  position,
+  color,
+}: {
+  position: [number, number, number];
+  color: string;
+}) {
+  return (
+    <mesh position={position}>
+      <circleGeometry args={[0.025, 16]} />
+      <meshStandardMaterial
+        color={color}
+        emissive={color}
+        emissiveIntensity={0.7}
+      />
+    </mesh>
+  );
+}
 
-  useFrame((_, delta) => {
-    for (const [i, ring] of ringRefs.current.entries()) {
-      if (ring) {
-        ring.rotation.z += delta * 0.05 * (i % 2 === 0 ? 1 : -1);
-      }
+function ConnectionLine({
+  to,
+  color,
+  phase,
+}: {
+  to: [number, number, number];
+  color: string;
+  phase: number;
+}) {
+  const lineRef = useRef<THREE.Group>(null);
+
+  useFrame((state) => {
+    const line = lineRef.current?.children[0] as THREE.Line | undefined;
+    const mat = line?.material as
+      | (THREE.LineDashedMaterial & { dashOffset: number })
+      | undefined;
+    if (mat && "dashOffset" in mat) {
+      mat.dashOffset = -state.clock.elapsedTime * 0.6 + phase;
     }
   });
 
-  const rings = useMemo(
-    () => PLATFORMS.map((p) => ({ radius: p.orbitRadius, tilt: p.orbitTilt })),
-    []
-  );
-
   return (
-    <>
-      {rings.map((r, i) => (
-        <mesh
-          key={`ring-${r.radius.toFixed(2)}-${r.tilt.toFixed(2)}`}
-          ref={(el) => {
-            ringRefs.current[i] = el;
-          }}
-          rotation={[Math.PI / 2 + r.tilt, 0, 0]}
-        >
-          <torusGeometry args={[r.radius, 0.005, 8, 128]} />
-          <meshBasicMaterial color="#8b5cf6" transparent opacity={0.12} />
-        </mesh>
-      ))}
-    </>
+    <group ref={lineRef}>
+      <Line
+        points={[
+          [0, 0, 0],
+          to,
+        ]}
+        color={color}
+        lineWidth={1.5}
+        transparent
+        opacity={0.55}
+        dashed
+        dashSize={0.18}
+        gapSize={0.12}
+      />
+    </group>
   );
 }
 
 export default function AgentScene() {
   return (
     <Canvas
-      camera={{ position: [0, 2.5, 8], fov: 50 }}
+      camera={{ position: [0, 1.5, 7], fov: 50 }}
       gl={{ antialias: true, alpha: true }}
       style={{ background: "transparent" }}
     >
       <color attach="background" args={["#05030f"]} />
-      <fog attach="fog" args={["#05030f", 8, 18]} />
+      <fog attach="fog" args={["#05030f", 9, 20]} />
 
-      <ambientLight intensity={0.15} />
-      <directionalLight position={[5, 5, 5]} intensity={0.4} />
+      <ambientLight intensity={0.2} />
+      <directionalLight position={[5, 5, 5]} intensity={0.45} />
       <pointLight position={[-5, -3, -5]} color="#06b6d4" intensity={0.8} />
+      <pointLight position={[5, 4, 4]} color="#a78bfa" intensity={0.5} />
 
-      <Stars
-        radius={50}
-        depth={30}
-        count={1500}
-        factor={3}
-        fade
-        speed={0.5}
-      />
+      <Stars radius={50} depth={30} count={1200} factor={3} fade speed={0.4} />
 
       <CoreNode />
-      <OrbitRings />
+
       {PLATFORMS.map((platform) => (
-        <PlatformNode key={platform.id} platform={platform} />
+        <ConnectionLine
+          key={`line-${platform.id}`}
+          to={platform.position}
+          color={platform.color}
+          phase={platform.phase}
+        />
+      ))}
+
+      {PLATFORMS.map((platform) => (
+        <BrowserWindow key={platform.id} platform={platform} />
       ))}
 
       <OrbitControls
         enablePan={false}
         enableZoom={false}
         autoRotate
-        autoRotateSpeed={0.4}
-        minPolarAngle={Math.PI / 3}
-        maxPolarAngle={(Math.PI * 2) / 3}
+        autoRotateSpeed={0.25}
+        minPolarAngle={Math.PI / 2.6}
+        maxPolarAngle={Math.PI / 1.8}
       />
     </Canvas>
   );
