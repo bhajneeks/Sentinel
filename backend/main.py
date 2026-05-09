@@ -344,6 +344,33 @@ class CampaignRequest(BaseModel):
             "twitter+reddit+linkedin when include_social_pulse is true."
         ),
     )
+    publish_scripts: bool = Field(
+        default=False,
+        description=(
+            "Run the creator-script subagent. When true, generates "
+            "`scripts_count` short-form scripts AND appends them to the Notion "
+            "page (NOTION_API_KEY + NOTION_SCRIPTS_PAGE_ID required). When "
+            "false, scripts are still generated and returned in the response, "
+            "but NOT pushed to Notion."
+        ),
+    )
+    scripts_count: int = Field(
+        default=3, ge=1, le=10,
+        description="How many creator scripts to produce.",
+    )
+    scripts_page_id: str | None = Field(
+        default=None,
+        max_length=64,
+        description=(
+            "Override NOTION_SCRIPTS_PAGE_ID for this run. Accepts a 32-hex "
+            "page ID with or without dashes."
+        ),
+    )
+    brand_name: str = Field(
+        default="Aroma Cloud",
+        max_length=120,
+        description="Brand commissioning the campaign — surfaces in DM template + Notion heading.",
+    )
 
 
 @app.post("/api/marketing-campaign")
@@ -371,6 +398,10 @@ async def marketing_campaign(req: CampaignRequest):
             shop_id=req.shop_id,
             include_social_pulse=req.include_social_pulse,
             social_platforms=req.social_platforms,
+            publish_scripts=req.publish_scripts,
+            scripts_count=req.scripts_count,
+            scripts_page_id=req.scripts_page_id,
+            brand_name=req.brand_name,
         )
     except ReacherConfigError as e:
         raise HTTPException(status_code=500, detail=str(e))

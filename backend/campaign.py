@@ -34,6 +34,7 @@ from typing import Any
 import agent
 import automations
 import reacher
+import scripts
 import social_pulse
 
 logger = logging.getLogger("uvicorn.error")
@@ -389,6 +390,10 @@ async def run_campaign_pipeline(
     shop_id: str | None = None,
     include_social_pulse: bool = False,
     social_platforms: list[str] | None = None,
+    publish_scripts: bool = False,
+    scripts_count: int = 3,
+    scripts_page_id: str | None = None,
+    brand_name: str = "Aroma Cloud",
 ) -> dict[str, Any]:
     """Orchestrator entry point — used by `POST /api/marketing-campaign`.
 
@@ -459,6 +464,26 @@ async def run_campaign_pipeline(
             ),
         },
     }
+
+    # Post-campaign creator-script step. Always builds (so the response shows
+    # what WOULD be published), but only PATCHes Notion when publish_scripts
+    # is true AND NOTION_API_KEY + NOTION_SCRIPTS_PAGE_ID resolve.
+    try:
+        result["scripts"] = await scripts.propose_scripts_for_campaign(
+            brief=brief,
+            intel=intel,
+            hooks=hooks,
+            context=context,
+            pulse=pulse,
+            campaign_markdown=campaign_md,
+            brand_name=brand_name,
+            count=scripts_count,
+            publish=publish_scripts,
+            page_id=scripts_page_id,
+        )
+    except Exception as exc:
+        logger.warning("scripts step failed: %s", exc)
+        result["scripts"] = {"error": str(exc)}
 
     # Post-campaign automation step. Always runs (so the response shows what
     # WOULD be sent), but the actual POST to Reacher is gated by
