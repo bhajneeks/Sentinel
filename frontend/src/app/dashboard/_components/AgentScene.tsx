@@ -146,35 +146,74 @@ type LineHandle = {
 const FLOAT_X_AMP = 0.06;
 const FLOAT_Y_AMP = 0.08;
 
-function EnergyPill({
+function _energyColor(energy: number): string {
+  return energy > 60 ? "#34d399" : energy > 25 ? "#fbbf24" : "#fb7185";
+}
+
+/**
+ * Energy bar rendered as 3D meshes inside the BrowserChrome — track on top
+ * of the body, fill plane scales horizontally with energy. Always visible
+ * because it billboards with the rest of the chrome and doesn't rely on
+ * `<Html>` occlusion.
+ */
+function EnergyBar3D({
   energy,
-  restartCount = 0,
+  restartCount,
 }: {
   energy: number;
-  restartCount?: number;
+  restartCount: number;
 }) {
   const clamped = Math.max(0, Math.min(100, energy));
-  const color = clamped > 60 ? "#34d399" : clamped > 25 ? "#fbbf24" : "#fb7185";
+  const ratio = clamped / 100;
+  const color = _energyColor(clamped);
+
+  // Mounted under the screen panel, inside the body. Body spans y=±0.625;
+  // screen ends at y=-0.585 → bar lives at y=-0.6 with height 0.04.
+  const TRACK_W = 1.7;
+  const TRACK_H = 0.04;
+  const Y = -0.6;
+  const Z = 0.034;
+
   return (
-    <span className="ml-1 flex items-center gap-1">
-      <span
-        className="block h-1 w-10 overflow-hidden rounded-full bg-zinc-800/80 ring-1 ring-white/10"
-        title={`energy ${Math.round(clamped)}%${restartCount ? ` · revives ${restartCount}` : ""}`}
+    <group>
+      {/* track */}
+      <mesh position={[0, Y, Z]}>
+        <planeGeometry args={[TRACK_W, TRACK_H]} />
+        <meshBasicMaterial color="#1a1530" transparent opacity={0.85} />
+      </mesh>
+      {/* fill — scaled width, anchored to left edge */}
+      <mesh
+        position={[-(TRACK_W / 2) + (TRACK_W * ratio) / 2, Y, Z + 0.001]}
+        scale={[Math.max(ratio, 0.001), 1, 1]}
       >
-        <span
-          className="block h-full transition-[width] duration-500"
-          style={{ width: `${clamped}%`, background: color }}
-        />
-      </span>
-      <span style={{ color }} className="font-semibold">
-        {Math.round(clamped)}
-      </span>
-      {restartCount > 0 ? (
-        <span className="rounded-full bg-violet-500/20 px-1 text-violet-300 ring-1 ring-violet-400/30">
-          r{restartCount}
-        </span>
-      ) : null}
-    </span>
+        <planeGeometry args={[TRACK_W, TRACK_H]} />
+        <meshBasicMaterial color={color} />
+      </mesh>
+      {/* glow halo behind */}
+      <mesh position={[0, Y, Z - 0.001]}>
+        <planeGeometry args={[TRACK_W + 0.06, TRACK_H + 0.04]} />
+        <meshBasicMaterial color={color} transparent opacity={0.18} />
+      </mesh>
+      {/* numeric label */}
+      <Html
+        center
+        distanceFactor={3}
+        position={[0, Y - 0.06, Z + 0.005]}
+        occlude={false}
+      >
+        <div
+          className="pointer-events-none flex items-center gap-1.5 whitespace-nowrap font-mono text-[10px] tracking-wider"
+          style={{ color }}
+        >
+          <span>⚡ {Math.round(clamped)}</span>
+          {restartCount > 0 ? (
+            <span className="rounded-full bg-violet-500/25 px-1.5 py-[1px] text-violet-200 ring-1 ring-violet-400/40">
+              revived ×{restartCount}
+            </span>
+          ) : null}
+        </div>
+      </Html>
+    </group>
   );
 }
 
@@ -314,9 +353,6 @@ function BrowserChrome({
             </span>
           ) : null}
           {addressText}
-          {live && typeof live.energy === "number" ? (
-            <EnergyPill energy={live.energy} restartCount={live.restartCount} />
-          ) : null}
         </div>
       </Html>
 
@@ -354,6 +390,12 @@ function BrowserChrome({
       )}
 
       {live && <LiveScreen liveUrl={live.liveUrl} platform={platform} query={live.query} />}
+      {live && typeof live.energy === "number" && (
+        <EnergyBar3D
+          energy={live.energy}
+          restartCount={live.restartCount ?? 0}
+        />
+      )}
     </group>
   );
 }
