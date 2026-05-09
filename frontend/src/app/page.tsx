@@ -1,3 +1,5 @@
+import Link from "next/link";
+
 const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
 
 export default async function Home() {
@@ -12,6 +14,12 @@ export default async function Home() {
       <p className="rounded-md bg-white px-4 py-2 text-lg text-zinc-700 shadow-sm dark:bg-zinc-900 dark:text-zinc-300">
         Backend says: <span className="font-mono">{message}</span>
       </p>
+      <Link
+        href="/dashboard"
+        className="rounded-md bg-zinc-900 px-4 py-2 text-sm font-medium text-zinc-50 shadow-sm hover:bg-zinc-800 dark:bg-zinc-100 dark:text-zinc-900 dark:hover:bg-zinc-200"
+      >
+        Open live iMessage dashboard →
+      </Link>
     </main>
   );
 }
