@@ -3,9 +3,12 @@ import json
 import logging
 import uuid
 from collections import deque
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from typing import Literal
 
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from apscheduler.triggers.interval import IntervalTrigger
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -18,6 +21,7 @@ load_dotenv()  # fallback to .env
 import agent  # noqa: E402  -- must come after load_dotenv()
 import campaign  # noqa: E402  -- must come after load_dotenv()
 import imessage  # noqa: E402  -- must come after load_dotenv()
+import social_pulse  # noqa: E402  -- must come after load_dotenv()
 from overshoot import (  # noqa: E402  -- must come after load_dotenv()
     DEFAULT_MODEL as OVERSHOOT_DEFAULT_MODEL,
     OvershootAPIError,
@@ -33,17 +37,48 @@ from reacher import (  # noqa: E402  -- must come after load_dotenv()
     get_trending_videos,
 )
 from scraper import scrape_x, scrape_linkedin, scrape_reddit, Mention  # noqa: E402
+import monitor_store  # noqa: E402
+from monitor_agent import _run as _monitor_run  # noqa: E402
 
 logger = logging.getLogger("uvicorn.error")
 
 MAX_BUFFERED = 500
 HISTORY_FOR_REPLY = 12
 
-app = FastAPI()
+# ── Monitor scheduler ─────────────────────────────────────────────────────────
+
+_scheduler = AsyncIOScheduler()
+_active_cfg: "MonitorConfig | None" = None
+
+
+async def _scheduled_run() -> None:
+    if _active_cfg is None:
+        return
+    try:
+        await _monitor_run(
+            _active_cfg.brand_terms,
+            _active_cfg.lookback_minutes,
+            _active_cfg.alert_to,
+            expand_if_quiet=True,
+        )
+    except Exception as exc:
+        logger.error("monitor scheduled run failed: %s", exc)
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    import monitor_agent
+    _scheduler.start()
+    yield
+    _scheduler.shutdown(wait=False)
+    monitor_agent._executor.shutdown(wait=False)
+
+
+app = FastAPI(lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000"],
+    allow_origins=["http://localhost:3000", "http://localhost:3001"],
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -278,6 +313,21 @@ class CampaignRequest(BaseModel):
             "using product_id (per-product endpoints reject 'all')."
         ),
     )
+    include_social_pulse: bool = Field(
+        default=False,
+        description=(
+            "Run the Browser-Use social-pulse subagent (TikTok/X/Reddit/LinkedIn) "
+            "in parallel with the Reacher subagents. Adds ~30-90s of latency."
+        ),
+    )
+    social_platforms: list[str] | None = Field(
+        default=None,
+        description=(
+            "Subset of platforms for the social-pulse subagent. Accepts any of "
+            "'tiktok', 'twitter' (or 'x'), 'reddit', 'linkedin'. Defaults to "
+            "twitter+reddit+linkedin when include_social_pulse is true."
+        ),
+    )
 
 
 @app.post("/api/marketing-campaign")
@@ -300,12 +350,81 @@ async def marketing_campaign(req: CampaignRequest):
         )
     try:
         return await campaign.run_campaign_pipeline(
-            req.brief, product_id=req.product_id, shop_id=req.shop_id,
+            req.brief,
+            product_id=req.product_id,
+            shop_id=req.shop_id,
+            include_social_pulse=req.include_social_pulse,
+            social_platforms=req.social_platforms,
         )
     except ReacherConfigError as e:
         raise HTTPException(status_code=500, detail=str(e))
     except ReacherAPIError as e:
         raise HTTPException(status_code=e.status, detail=e.body)
+
+
+class SocialInsightsRequest(BaseModel):
+    topic: str = Field(
+        ...,
+        min_length=2,
+        max_length=200,
+        description="Topic, brand, or query to gather a live cross-platform pulse on.",
+    )
+    platforms: list[str] | None = Field(
+        default=None,
+        description=(
+            "Subset of platforms. Accepts any of 'tiktok', 'twitter' (or 'x'), "
+            "'reddit', 'linkedin'. Defaults to twitter+reddit+linkedin."
+        ),
+    )
+    top_n: int = Field(
+        default=3, ge=1, le=10,
+        description="Most-recent items to collect per platform.",
+    )
+    scrolls: int = Field(
+        default=8, ge=1, le=30,
+        description="Max scroll steps per platform (upper bound on collection).",
+    )
+    summarize: bool = Field(
+        default=True,
+        description=(
+            "When true, run an LLM summarizer over the pulse and return a "
+            "markdown insights report. When false, just return the raw pulse."
+        ),
+    )
+
+
+@app.post("/api/social-insights")
+async def social_insights_endpoint(req: SocialInsightsRequest):
+    """Fast path: scrape live posts on a topic across socials, return insights.
+
+    Two modes (toggled by `summarize`):
+      * `summarize=true` (default): runs the four Browser-Use scrapers in
+        parallel, then asks the LLM for a tight bulleted "what's happening
+        now" markdown report. Response shape: see `social_pulse.social_insights`.
+      * `summarize=false`: returns the raw structured pulse only — useful for
+        UIs that want to render the items themselves.
+    """
+    try:
+        if req.summarize:
+            if not agent.is_configured():
+                raise HTTPException(
+                    status_code=500,
+                    detail="OPENAI_API_KEY is not set — cannot summarize.",
+                )
+            return await social_pulse.social_insights(
+                req.topic,
+                platforms=req.platforms,
+                top_n=req.top_n,
+                scrolls=req.scrolls,
+            )
+        return await social_pulse.gather_social_pulse(
+            req.topic,
+            platforms=req.platforms,
+            top_n=req.top_n,
+            scrolls=req.scrolls,
+        )
+    except RuntimeError as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.get("/api/messages")
@@ -439,3 +558,72 @@ async def scrape(req: ScrapeRequest) -> ScrapeResponse:
     )
     mentions = [m for batch in results for m in batch]
     return ScrapeResponse(mentions=mentions)
+
+
+# ── Monitor endpoints ─────────────────────────────────────────────────────────
+
+
+class MonitorConfig(BaseModel):
+    brand_terms: list[str] = Field(..., min_length=1)
+    lookback_minutes: int = Field(60, ge=5, le=1440)
+    alert_to: str | None = None
+    interval_minutes: int = Field(15, ge=1, le=1440)
+
+
+@app.post("/api/monitor/config")
+def set_monitor_config(cfg: MonitorConfig):
+    global _active_cfg
+    _active_cfg = cfg
+    _scheduler.remove_all_jobs()
+    _scheduler.add_job(
+        _scheduled_run,
+        IntervalTrigger(minutes=cfg.interval_minutes),
+        id="brand_monitor",
+        replace_existing=True,
+        max_instances=1,
+        misfire_grace_time=60,
+    )
+    return {"ok": True, "config": cfg.model_dump()}
+
+
+@app.get("/api/monitor/status")
+def monitor_status():
+    state = monitor_store.load()
+    job = _scheduler.get_job("brand_monitor")
+    runs = state.get("runs", [])
+    return {
+        "enabled": _active_cfg is not None,
+        "config": _active_cfg.model_dump() if _active_cfg else None,
+        "last_run": runs[-1] if runs else None,
+        "next_run": job.next_run_time.isoformat() if job and job.next_run_time else None,
+        "total_seen": len(state.get("seen_ids", [])),
+        "signal_threshold": state.get("signal_threshold", 5),
+        "quiet_runs": state.get("quiet_runs", 0),
+        "last_alert_at": state.get("last_alert_at"),
+        "tensorlake_active": True,
+    }
+
+
+@app.get("/api/monitor/history")
+def monitor_history(limit: int = Query(50, ge=1, le=500)):
+    state = monitor_store.load()
+    return {
+        "mentions": state.get("history", [])[-limit:][::-1],
+        "runs": state.get("runs", [])[-20:][::-1],
+        "baselines": {
+            p: monitor_store.platform_baseline(state, p)
+            for p in state.get("baselines", {})
+        },
+    }
+
+
+@app.post("/api/monitor/trigger")
+async def trigger_monitor():
+    if _active_cfg is None:
+        raise HTTPException(status_code=400, detail="Configure brand terms first via /api/monitor/config")
+    return await _monitor_run(
+        _active_cfg.brand_terms,
+        _active_cfg.lookback_minutes,
+        _active_cfg.alert_to,
+        expand_if_quiet=True,
+    )
