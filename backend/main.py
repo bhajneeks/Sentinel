@@ -98,7 +98,7 @@ class AnalyzeVideoRequest(BaseModel):
     model: str = Field(
         OVERSHOOT_DEFAULT_MODEL,
         max_length=200,
-        description="Overshoot model id, e.g. 'google/gemma-4-E4B-it'.",
+        description="Overshoot model id, e.g. 'google/gemma-4-31B-it'.",
     )
     hook_window_ms: int = Field(
         3000, ge=500, le=15000,
@@ -112,6 +112,10 @@ class AnalyzeVideoRequest(BaseModel):
         480, ge=144, le=1080,
         description="Downscale frames to this height before publishing.",
     )
+    playback_speed: float = Field(
+        4.0, ge=1.0, le=20.0,
+        description="1.0 = realtime publish; higher = faster but compressed stream-clock.",
+    )
 
 
 @app.post("/api/analyze-video")
@@ -124,6 +128,7 @@ async def analyze_video(req: AnalyzeVideoRequest):
             hook_window_ms=req.hook_window_ms,
             publish_fps=req.publish_fps,
             max_height=req.max_height,
+            playback_speed=req.playback_speed,
         )
     except OvershootConfigError as e:
         raise HTTPException(status_code=500, detail=str(e))
