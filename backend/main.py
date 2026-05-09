@@ -18,6 +18,7 @@ load_dotenv()  # fallback to .env
 import agent  # noqa: E402  -- must come after load_dotenv()
 import campaign  # noqa: E402  -- must come after load_dotenv()
 import imessage  # noqa: E402  -- must come after load_dotenv()
+import social_pulse  # noqa: E402  -- must come after load_dotenv()
 from overshoot import (  # noqa: E402  -- must come after load_dotenv()
     DEFAULT_MODEL as OVERSHOOT_DEFAULT_MODEL,
     OvershootAPIError,
@@ -278,6 +279,21 @@ class CampaignRequest(BaseModel):
             "using product_id (per-product endpoints reject 'all')."
         ),
     )
+    include_social_pulse: bool = Field(
+        default=False,
+        description=(
+            "Run the Browser-Use social-pulse subagent (TikTok/X/Reddit/LinkedIn) "
+            "in parallel with the Reacher subagents. Adds ~30-90s of latency."
+        ),
+    )
+    social_platforms: list[str] | None = Field(
+        default=None,
+        description=(
+            "Subset of platforms for the social-pulse subagent. Accepts any of "
+            "'tiktok', 'twitter' (or 'x'), 'reddit', 'linkedin'. Defaults to "
+            "twitter+reddit+linkedin when include_social_pulse is true."
+        ),
+    )
 
 
 @app.post("/api/marketing-campaign")
@@ -300,12 +316,81 @@ async def marketing_campaign(req: CampaignRequest):
         )
     try:
         return await campaign.run_campaign_pipeline(
-            req.brief, product_id=req.product_id, shop_id=req.shop_id,
+            req.brief,
+            product_id=req.product_id,
+            shop_id=req.shop_id,
+            include_social_pulse=req.include_social_pulse,
+            social_platforms=req.social_platforms,
         )
     except ReacherConfigError as e:
         raise HTTPException(status_code=500, detail=str(e))
     except ReacherAPIError as e:
         raise HTTPException(status_code=e.status, detail=e.body)
+
+
+class SocialInsightsRequest(BaseModel):
+    topic: str = Field(
+        ...,
+        min_length=2,
+        max_length=200,
+        description="Topic, brand, or query to gather a live cross-platform pulse on.",
+    )
+    platforms: list[str] | None = Field(
+        default=None,
+        description=(
+            "Subset of platforms. Accepts any of 'tiktok', 'twitter' (or 'x'), "
+            "'reddit', 'linkedin'. Defaults to twitter+reddit+linkedin."
+        ),
+    )
+    top_n: int = Field(
+        default=3, ge=1, le=10,
+        description="Most-recent items to collect per platform.",
+    )
+    scrolls: int = Field(
+        default=8, ge=1, le=30,
+        description="Max scroll steps per platform (upper bound on collection).",
+    )
+    summarize: bool = Field(
+        default=True,
+        description=(
+            "When true, run an LLM summarizer over the pulse and return a "
+            "markdown insights report. When false, just return the raw pulse."
+        ),
+    )
+
+
+@app.post("/api/social-insights")
+async def social_insights_endpoint(req: SocialInsightsRequest):
+    """Fast path: scrape live posts on a topic across socials, return insights.
+
+    Two modes (toggled by `summarize`):
+      * `summarize=true` (default): runs the four Browser-Use scrapers in
+        parallel, then asks the LLM for a tight bulleted "what's happening
+        now" markdown report. Response shape: see `social_pulse.social_insights`.
+      * `summarize=false`: returns the raw structured pulse only — useful for
+        UIs that want to render the items themselves.
+    """
+    try:
+        if req.summarize:
+            if not agent.is_configured():
+                raise HTTPException(
+                    status_code=500,
+                    detail="OPENAI_API_KEY is not set — cannot summarize.",
+                )
+            return await social_pulse.social_insights(
+                req.topic,
+                platforms=req.platforms,
+                top_n=req.top_n,
+                scrolls=req.scrolls,
+            )
+        return await social_pulse.gather_social_pulse(
+            req.topic,
+            platforms=req.platforms,
+            top_n=req.top_n,
+            scrolls=req.scrolls,
+        )
+    except RuntimeError as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.get("/api/messages")

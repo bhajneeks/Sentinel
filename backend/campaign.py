@@ -34,6 +34,7 @@ from typing import Any
 import agent
 import automations
 import reacher
+import social_pulse
 
 logger = logging.getLogger("uvicorn.error")
 
@@ -68,6 +69,11 @@ You will receive a JSON payload with:
   - brief                : the team's request
   - competitor_intel     : similar TikTok Shop products + the creators driving them
   - trending_hooks       : top-performing videos in the same product space
+  - social_pulse         : OPTIONAL. Recent posts about the topic across X,
+                           Reddit, LinkedIn, TikTok (Browser-Use scrapers).
+                           When present, use it for live cultural context and
+                           to ground hooks in real conversations happening now.
+                           If absent or `null`, ignore.
   - company_context      : Nozomio brand overview and a compressed history of past
                            campaigns (use these for voice + to avoid repeating ideas)
 
@@ -315,8 +321,9 @@ async def generate_campaign(
     intel: dict[str, Any] | Exception,
     hooks: dict[str, Any] | Exception,
     context: dict[str, Any],
+    pulse: dict[str, Any] | Exception | None = None,
 ) -> str:
-    payload = {
+    payload: dict[str, Any] = {
         "brief": brief,
         "competitor_intel": (
             {"error": str(intel)} if isinstance(intel, Exception) else intel
@@ -326,6 +333,10 @@ async def generate_campaign(
         ),
         "company_context": context,
     }
+    if pulse is not None:
+        payload["social_pulse"] = (
+            {"error": str(pulse)} if isinstance(pulse, Exception) else pulse
+        )
     user_msg = json.dumps(payload, default=str)[:60_000]
     return await agent.chat_completion(
         messages=[
@@ -376,6 +387,8 @@ async def run_campaign_pipeline(
     *,
     product_id: str | None = None,
     shop_id: str | None = None,
+    include_social_pulse: bool = False,
+    social_platforms: list[str] | None = None,
 ) -> dict[str, Any]:
     """Orchestrator entry point — used by `POST /api/marketing-campaign`.
 
@@ -384,6 +397,11 @@ async def run_campaign_pipeline(
     hooks) still uses the LLM-extracted query to keep the hook signal broad.
 
     `shop_id` overrides the `REACHER_SHOP_ID` env for this run only.
+
+    `include_social_pulse=True` adds a 4th subagent that runs the Browser-Use
+    scrapers (TikTok / X / Reddit / LinkedIn) in parallel. Adds 30–90s of
+    latency per platform — opt-in only. `social_platforms` selects a subset
+    (defaults to twitter+reddit+linkedin; pass `["tiktok"]` etc. to narrow).
     """
     query = await extract_product_query(brief)
 
@@ -400,11 +418,20 @@ async def run_campaign_pipeline(
     )
     context = gather_company_context()
 
-    intel, hooks = await asyncio.gather(
-        intel_task, hooks_task, return_exceptions=True,
-    )
+    pulse_task: asyncio.Task | None = None
+    if include_social_pulse:
+        pulse_task = asyncio.create_task(
+            social_pulse.gather_social_pulse(query, platforms=social_platforms)
+        )
 
-    campaign_md = await generate_campaign(brief, intel, hooks, context)
+    parallel = [intel_task, hooks_task]
+    if pulse_task is not None:
+        parallel.append(pulse_task)
+    gathered = await asyncio.gather(*parallel, return_exceptions=True)
+    intel, hooks = gathered[0], gathered[1]
+    pulse = gathered[2] if pulse_task is not None else None
+
+    campaign_md = await generate_campaign(brief, intel, hooks, context, pulse)
     saved_to = persist_campaign(brief, query, campaign_md)
 
     result: dict[str, Any] = {
@@ -424,6 +451,12 @@ async def run_campaign_pipeline(
                 "loaded_files": list((context.get("company_docs") or {}).keys()),
                 "past_campaign_count": len(context.get("past_campaign_memory") or []),
             },
+            **(
+                {"social_pulse": (
+                    {"error": str(pulse)} if isinstance(pulse, Exception) else pulse
+                )}
+                if pulse_task is not None else {}
+            ),
         },
     }
 

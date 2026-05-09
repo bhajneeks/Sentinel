@@ -27,9 +27,21 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import json
+import os
+import re
+from typing import Any
 from urllib.parse import quote
 
-from browser_use_common import add_common_args, run_login_session, run_scrape
+from browser_use_common import (
+    DEFAULT_PROFILE_NAME,
+    add_common_args,
+    run_login_session,
+    run_scrape,
+    run_scrape_collect,
+)
+
+PROFILE_ENV_VAR = "BROWSER_USE_TIKTOK_PROFILE_ID"
 
 
 def build_task(scrolls: int, query: str | None) -> tuple[str, str]:
@@ -78,10 +90,61 @@ def build_task(scrolls: int, query: str | None) -> tuple[str, str]:
         " 3. Wait ~2 seconds so the video can play.\n"
         "Stay inside the video player the whole time — never navigate to a "
         "creator profile or back to the search grid.\n\n"
-        "When done, return the captions and creator handles of the 5 most recent "
-        "videos you saw."
+        f"WHEN DONE — return STRICTLY a JSON array of the {min(5, scrolls)} MOST "
+        "RECENT videos you watched (newest-first), each object with these keys:\n"
+        '  {"caption": str, "author": str, "handle": str, '
+        '"posted": str, "url": str, "summary": str}\n'
+        "`url` should be the absolute permalink (https://www.tiktok.com/@<handle>/video/<id>) "
+        "if visible. `summary` is a one-sentence gist. Do not include any prose "
+        "outside the JSON array."
     )
     return start_url, task
+
+
+def _parse_json_array(raw: str | None) -> list[dict[str, Any]]:
+    """Browser-Use sometimes wraps the JSON in commentary. Pull the first array out."""
+    if not raw:
+        return []
+    m = re.search(r"\[[\s\S]*\]", raw)
+    if not m:
+        return []
+    try:
+        data = json.loads(m.group(0))
+    except json.JSONDecodeError:
+        return []
+    return data if isinstance(data, list) else []
+
+
+async def scrape(
+    query: str | None = None,
+    *,
+    scrolls: int = 10,
+    profile_id: str | None = None,
+    profile_name: str = DEFAULT_PROFILE_NAME,
+    no_profile: bool = False,
+    llm: str = "browser-use-2.0",
+) -> dict[str, Any]:
+    """Library entrypoint: returns {'platform','query','items','raw','success'}.
+
+    `query=None` opens the For You feed; otherwise searches.
+    """
+    pid = profile_id or os.environ.get(PROFILE_ENV_VAR)
+    start_url, task = build_task(scrolls, query)
+    success, raw = await run_scrape_collect(
+        start_url=start_url,
+        task=task,
+        llm=llm,
+        profile_name=profile_name,
+        profile_id=pid,
+        no_profile=no_profile,
+    )
+    return {
+        "platform": "tiktok",
+        "query": query,
+        "items": _parse_json_array(raw),
+        "raw": raw,
+        "success": success,
+    }
 
 
 def main() -> None:
