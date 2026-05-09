@@ -13,6 +13,7 @@ import type * as runs from "../runs.js";
 import type * as screenshots from "../screenshots.js";
 import type * as sessions from "../sessions.js";
 import type * as steps from "../steps.js";
+import type * as supervisorEvents from "../supervisorEvents.js";
 
 import type {
   ApiFromModules,
@@ -26,6 +27,7 @@ declare const fullApi: ApiFromModules<{
   screenshots: typeof screenshots;
   sessions: typeof sessions;
   steps: typeof steps;
+  supervisorEvents: typeof supervisorEvents;
 }>;
 
 /**
