@@ -43,7 +43,7 @@ from monitor_agent import _run as _monitor_run  # noqa: E402
 logger = logging.getLogger("uvicorn.error")
 
 MAX_BUFFERED = 500
-HISTORY_FOR_REPLY = 12
+HISTORY_FOR_REPLY = 30
 
 # ── Monitor scheduler ─────────────────────────────────────────────────────────
 
@@ -487,6 +487,18 @@ def close_conversation(participant: str):
 @app.post("/api/conversations/{participant}/reopen", status_code=204)
 def reopen_conversation(participant: str):
     closed_participants.discard(participant)
+
+
+@app.post("/api/agents/{participant}/stop")
+async def stop_agents(participant: str) -> dict[str, int]:
+    """Stop every supervised browser agent associated with this participant.
+
+    Closes the BU cloud sessions (so we stop billing) and marks the
+    Convex rows complete so the dashboard removes them. Idempotent.
+    """
+    import supervised_agent
+    closed = await supervised_agent.close_all_for_participant(participant)
+    return {"stopped": closed}
 
 
 def _derive_participant(message: Message) -> str | None:

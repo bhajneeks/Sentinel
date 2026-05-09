@@ -300,8 +300,8 @@ function DashboardInner() {
             />
           </section>
           <section className="relative flex-1 bg-[#05030f]">
-            <AgentScene />
-            <SceneOverlayLive />
+            <AgentScene participant={activeParticipant} />
+            <SceneOverlayLive participant={activeParticipant} />
           </section>
         </div>
       </div>
@@ -399,13 +399,34 @@ function BackgroundGlow() {
   );
 }
 
-function SceneOverlayLive() {
-  const sessions = useQuery(api.sessions.activeCloud) ?? [];
+function SceneOverlayLive({ participant }: { participant: string | null }) {
+  const sessions =
+    useQuery(
+      api.sessions.activeCloud,
+      participant ? { participant } : { participant: undefined },
+    ) ?? [];
+  const [stopping, setStopping] = useState(false);
   const liveCount = sessions.length;
   const summary =
     liveCount === 0
       ? "4 browsers · idle"
       : `${liveCount} live · ${4 - Math.min(liveCount, 4)} idle`;
+
+  const handleStop = useCallback(async () => {
+    if (!participant || stopping) return;
+    setStopping(true);
+    try {
+      await fetch(
+        `${API_URL}/api/agents/${encodeURIComponent(participant)}/stop`,
+        { method: "POST" },
+      );
+    } catch {
+      // best-effort; convex query will refresh either way
+    } finally {
+      setStopping(false);
+    }
+  }, [participant, stopping]);
+
   return (
     <div className="pointer-events-none absolute inset-0 flex flex-col justify-between p-4">
       <div className="flex items-center justify-between">
@@ -413,16 +434,30 @@ function SceneOverlayLive() {
           <div className="font-mono text-[10px] text-violet-300/60 uppercase tracking-[0.25em]">
             Browser fleet
           </div>
-          <div className="font-medium text-sm text-white/90">Live scrape network</div>
+          <div className="font-medium text-sm text-white/90">
+            {participant ? "Live scrape network · scoped" : "Live scrape network"}
+          </div>
         </div>
-        <div
-          className={`rounded-full px-2.5 py-1 font-mono text-[10px] ring-1 backdrop-blur ${
-            liveCount > 0
-              ? "bg-rose-500/10 text-rose-200 ring-rose-400/30"
-              : "bg-black/40 text-zinc-400 ring-white/10"
-          }`}
-        >
-          {summary}
+        <div className="flex items-center gap-2">
+          {participant && liveCount > 0 && (
+            <button
+              type="button"
+              onClick={handleStop}
+              disabled={stopping}
+              className="pointer-events-auto rounded-full bg-rose-500/15 px-2.5 py-1 font-mono text-[10px] text-rose-200 ring-1 ring-rose-400/30 backdrop-blur transition-colors hover:bg-rose-500/25 disabled:cursor-wait disabled:opacity-60"
+            >
+              {stopping ? "stopping…" : `stop ${liveCount} browser${liveCount === 1 ? "" : "s"}`}
+            </button>
+          )}
+          <div
+            className={`rounded-full px-2.5 py-1 font-mono text-[10px] ring-1 backdrop-blur ${
+              liveCount > 0
+                ? "bg-rose-500/10 text-rose-200 ring-rose-400/30"
+                : "bg-black/40 text-zinc-400 ring-white/10"
+            }`}
+          >
+            {summary}
+          </div>
         </div>
       </div>
       <div className="flex items-end justify-between font-mono text-[10px] text-zinc-500">

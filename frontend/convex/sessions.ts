@@ -27,8 +27,9 @@ export const startCloud = mutation({
     query: v.string(),
     liveUrl: v.string(),
     cloudSessionId: v.string(),
+    participant: v.optional(v.string()),
   },
-  handler: async (ctx, { platform, query, liveUrl, cloudSessionId }) => {
+  handler: async (ctx, { platform, query, liveUrl, cloudSessionId, participant }) => {
     return await ctx.db.insert("scraperSessions", {
       platform,
       query,
@@ -37,6 +38,7 @@ export const startCloud = mutation({
       browserBacked: true,
       liveUrl,
       cloudSessionId,
+      ...(participant ? { participant } : {}),
     });
   },
 });
@@ -79,18 +81,38 @@ export const byRun = query({
   },
 });
 
-/** Currently-live cloud sessions (those exposing a live_url). */
+/** Currently-live cloud sessions (those exposing a live_url).
+ *
+ * If `participant` is provided, returns only sessions for that iMessage
+ * conversation. Otherwise returns every live cloud session.
+ */
 export const activeCloud = query({
-  args: {},
-  handler: async (ctx) => {
-    const running = await ctx.db
-      .query("scraperSessions")
-      .withIndex("by_status", (q) => q.eq("status", "running"))
-      .collect();
-    const starting = await ctx.db
-      .query("scraperSessions")
-      .withIndex("by_status", (q) => q.eq("status", "starting"))
-      .collect();
+  args: { participant: v.optional(v.string()) },
+  handler: async (ctx, { participant }) => {
+    let running, starting;
+    if (participant !== undefined) {
+      running = await ctx.db
+        .query("scraperSessions")
+        .withIndex("by_participant_status", (q) =>
+          q.eq("participant", participant).eq("status", "running"),
+        )
+        .collect();
+      starting = await ctx.db
+        .query("scraperSessions")
+        .withIndex("by_participant_status", (q) =>
+          q.eq("participant", participant).eq("status", "starting"),
+        )
+        .collect();
+    } else {
+      running = await ctx.db
+        .query("scraperSessions")
+        .withIndex("by_status", (q) => q.eq("status", "running"))
+        .collect();
+      starting = await ctx.db
+        .query("scraperSessions")
+        .withIndex("by_status", (q) => q.eq("status", "starting"))
+        .collect();
+    }
     return [...starting, ...running]
       .filter((s) => typeof s.liveUrl === "string" && s.liveUrl.length > 0)
       .map((s) => ({
@@ -99,6 +121,8 @@ export const activeCloud = query({
         query: s.query,
         liveUrl: s.liveUrl as string,
         startedAt: s.startedAt,
+        participant: s.participant ?? null,
+        cloudSessionId: s.cloudSessionId ?? null,
       }));
   },
 });
@@ -120,6 +144,36 @@ export const activeBrowserCount = query({
       )
       .collect();
     return running.length + starting.length;
+  },
+});
+
+/** Mark every running session for `participant` as `complete`. Returns the
+ * cloudSessionIds the backend should also stop on Browser-Use Cloud. */
+export const stopByParticipant = mutation({
+  args: { participant: v.string() },
+  handler: async (ctx, { participant }) => {
+    const running = await ctx.db
+      .query("scraperSessions")
+      .withIndex("by_participant_status", (q) =>
+        q.eq("participant", participant).eq("status", "running"),
+      )
+      .collect();
+    const starting = await ctx.db
+      .query("scraperSessions")
+      .withIndex("by_participant_status", (q) =>
+        q.eq("participant", participant).eq("status", "starting"),
+      )
+      .collect();
+    const all = [...running, ...starting];
+    const cloudSessionIds: string[] = [];
+    for (const s of all) {
+      await ctx.db.patch(s._id, {
+        status: "complete",
+        completedAt: Date.now(),
+      });
+      if (s.cloudSessionId) cloudSessionIds.push(s.cloudSessionId);
+    }
+    return { stopped: all.length, cloudSessionIds };
   },
 });
 

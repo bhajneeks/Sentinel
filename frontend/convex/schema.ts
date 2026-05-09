@@ -57,10 +57,14 @@ export default defineSchema({
     liveUrl: v.optional(v.string()),
     /** Opaque Browser-Use Cloud session id (for cross-reference / debugging). */
     cloudSessionId: v.optional(v.string()),
+    /** iMessage participant (phone number / Apple ID) the session belongs to.
+     * Used to scope the dashboard view to the active conversation. */
+    participant: v.optional(v.string()),
   })
     .index("by_run", ["runId"])
     .index("by_status", ["status"])
-    .index("by_browser_status", ["browserBacked", "status"]),
+    .index("by_browser_status", ["browserBacked", "status"])
+    .index("by_participant_status", ["participant", "status"]),
 
   scraperSteps: defineTable({
     sessionId: v.id("scraperSessions"),

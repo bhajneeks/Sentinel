@@ -74,19 +74,37 @@ async def start_session(
 
 
 async def start_cloud_session(
-    *, platform: str, query: str, live_url: str, cloud_session_id: str
+    *,
+    platform: str,
+    query: str,
+    live_url: str,
+    cloud_session_id: str,
+    participant: str | None = None,
 ) -> str:
     """Register a Browser-Use Cloud scroll session with Convex.
 
     Standalone — no run_id. Used by `*_scroll.py` so the dashboard can render
-    the live iframe in the matching platform slot.
+    the live iframe in the matching platform slot. `participant` (when set)
+    scopes the session to a specific iMessage conversation tab.
     """
     client = get_client()
-    return await _run(client.mutation, "sessions:startCloud", {
+    args: dict[str, Any] = {
         "platform": platform,
         "query": query,
         "liveUrl": live_url,
         "cloudSessionId": cloud_session_id,
+    }
+    if participant:
+        args["participant"] = participant
+    return await _run(client.mutation, "sessions:startCloud", args)
+
+
+async def stop_by_participant(participant: str) -> dict[str, Any]:
+    """Mark every running session for `participant` complete. Returns
+    `{stopped: int, cloudSessionIds: list[str]}`."""
+    client = get_client()
+    return await _run(client.mutation, "sessions:stopByParticipant", {
+        "participant": participant,
     })
 
 

@@ -247,6 +247,7 @@ async def _start_one(
         query=company,
         live_url=session.live_url,
         cloud_session_id=session.id,
+        participant=participant,
     )
     if not convex_id:
         # Convex isn't configured / publish failed — close the cloud session
@@ -459,7 +460,13 @@ async def spawn(
 
 
 async def close_all_for_participant(participant: str) -> int:
-    """Close every supervised handle for `participant`. Returns count closed."""
+    """Close every supervised handle for `participant`. Returns count closed.
+
+    This handles in-memory handles AND any rows in Convex (which may belong
+    to a previous backend process that has since restarted). The BU cloud
+    sessions are stopped via the SDK using the cloudSessionIds Convex
+    returns.
+    """
     closed = 0
     handles_to_close: list[AgentHandle] = []
     for h in list(_registry.get(participant, {}).values()):
@@ -474,6 +481,24 @@ async def close_all_for_participant(participant: str) -> int:
             logger.warning("close_all: %s", exc)
     _registry.pop(participant, None)
     _orbits.pop(participant, None)
+
+    # Also stop any rows tracked in Convex that this process didn't spawn
+    # (e.g. left behind by a prior backend process).
+    try:
+        result = await cx.stop_by_participant(participant)
+    except Exception as exc:
+        logger.warning("stop_by_participant convex call failed: %s", exc)
+        return closed
+
+    cloud_ids: list[str] = result.get("cloudSessionIds") or []
+    if cloud_ids:
+        client = make_client()
+        for cs_id in cloud_ids:
+            try:
+                await client.sessions.update_session(cs_id, action="stop")
+                closed += 1
+            except Exception as exc:
+                logger.warning("BU stop failed for %s: %s", cs_id, exc)
     return closed
 
 

@@ -73,6 +73,13 @@ type LiveSession = {
   platform: string;
   query: string;
   liveUrl: string;
+  startedAt?: number;
+  participant?: string | null;
+  cloudSessionId?: string | null;
+};
+
+type AgentSceneProps = {
+  participant: string | null;
 };
 
 function CoreNode() {
@@ -419,8 +426,12 @@ function makeExtraPlatform(session: LiveSession, index: number, total: number): 
   };
 }
 
-export default function AgentScene() {
-  const cloudSessions = useQuery(api.sessions.activeCloud) ?? [];
+export default function AgentScene({ participant }: AgentSceneProps) {
+  const cloudSessions =
+    useQuery(
+      api.sessions.activeCloud,
+      participant ? { participant } : { participant: undefined },
+    ) ?? [];
 
   const { slotByPlatform, extras } = useMemo(() => {
     const grouped = new Map<string, LiveSession[]>();
