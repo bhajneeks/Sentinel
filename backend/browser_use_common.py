@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import sys
 import webbrowser
 from typing import Awaitable, Callable
 
@@ -23,6 +24,13 @@ from dotenv import load_dotenv
 
 load_dotenv(".env.local")
 load_dotenv()
+
+# Windows consoles default to cp1252 and crash on emoji in agent output.
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(encoding="utf-8", errors="replace")
+    except (AttributeError, ValueError):
+        pass
 
 from browser_use_sdk import AsyncBrowserUse  # noqa: E402
 
