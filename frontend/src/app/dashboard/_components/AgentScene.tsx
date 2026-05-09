@@ -329,27 +329,23 @@ function LiveScreen({
   platform: Platform;
   query: string;
 }) {
-  // The chrome's screen-content plane is 1.86 × 1.0 world units.
-  // We render the iframe at 930×500 CSS px (1.86:1) and scale by 0.002
-  // so its world footprint matches the panel exactly.
-  const IFRAME_W = 930;
-  const IFRAME_H = 500;
-  const SCALE = 0.002;
-
+  // drei's <Html transform> uses a CSS3D matrix with scale 1/(distanceFactor||10/400).
+  // distanceFactor=1 + 372×200 px rendered at ~25% of the chrome plane
+  // (see fix history). 4× pixel dims at the same distanceFactor fills it.
   return (
     <Html
       transform
       occlude
       position={[0, -0.085, 0.035]}
-      scale={SCALE}
+      distanceFactor={1}
       style={{ pointerEvents: "auto" }}
     >
       <div
         className="relative overflow-hidden rounded-[6px] ring-1 ring-white/10"
         style={{
-          width: IFRAME_W,
-          height: IFRAME_H,
-          boxShadow: `0 0 24px ${platform.emissive}55`,
+          width: 1488,
+          height: 800,
+          boxShadow: `0 0 36px ${platform.emissive}55`,
         }}
       >
         <iframe
@@ -361,7 +357,7 @@ function LiveScreen({
           title={`${platform.label} live · ${query}`}
           className="h-full w-full border-0"
         />
-        <div className="pointer-events-none absolute right-2 bottom-2 rounded-full bg-black/70 px-2 py-[3px] font-mono text-[10px] text-zinc-200 ring-1 ring-white/10 backdrop-blur">
+        <div className="pointer-events-none absolute right-3 bottom-3 rounded-full bg-black/70 px-3 py-1 font-mono text-[14px] text-zinc-200 ring-1 ring-white/10 backdrop-blur">
           {platform.label} · {query}
         </div>
       </div>
