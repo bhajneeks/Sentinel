@@ -461,7 +461,13 @@ def list_conversations() -> list[ConversationSummary]:
 
 @app.post("/api/conversations/{participant}/close", status_code=204)
 def close_conversation(participant: str):
+    """Close = forget. Drops every stored message for this participant
+    so the conversation does not reappear on reconnect or via the
+    snapshot stream."""
     closed_participants.add(participant)
+    survivors = [m for m in messages if m.participant != participant]
+    messages.clear()
+    messages.extend(survivors)
 
 
 @app.post("/api/conversations/{participant}/reopen", status_code=204)
@@ -491,8 +497,10 @@ async def ingest_message(message: Message):
     if derived and derived != message.participant:
         message = message.model_copy(update={"participant": derived})
 
-    if message.participant in closed_participants:
-        closed_participants.discard(message.participant)
+    # Closed = forget. Drop messages from closed participants so old
+    # conversations do not silently re-accumulate state.
+    if message.participant and message.participant in closed_participants:
+        return
     messages.append(message)
     broadcast(message)
     if (
