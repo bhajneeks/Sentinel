@@ -1,16 +1,32 @@
 """OpenAI tool layer.
 
-Rachel (the chat agent) gets four tools:
+Rachel (the chat agent) drives TWO distinct pipelines from the same iMessage
+conversation. The intent routing lives in `prompt.md`; this module owns the
+machinery.
 
-- track_company(company, link) — opens a fresh tracking run for the active conversation
-- search_reddit(query)        — Reddit JSON-API scraper, fire-and-forget
-- search_x(query)             — browser-use scraper for X (counts toward 25-browser cap)
-- search_linkedin(query)      — browser-use scraper for LinkedIn (counts toward cap)
+PIPELINE A — TRACKING (live company-watching):
+- `track_company(company, link)`  — open a fresh tracking run + spawn 4
+                                    supervised browser agents AND persist a
+                                    Nia-indexed record under `data/tracked/`.
+- `search_reddit(query)`          — Reddit JSON-API scraper, fire-and-forget.
+- `search_x(query)`               — browser-use scraper for X (counts toward cap).
+- `search_linkedin(query)`        — browser-use scraper for LinkedIn (counts toward cap).
+- `screenshot(platform)`          — peek at what a supervised agent is seeing.
+- `redirect(platform, task)`      — steer a supervised agent to a new task.
+- `close(platform)` / `spawn(...)`— manage the supervised agents.
+- `list_tracked_topics()`         — answer "what topics are you watching?".
 
-The tools return short status strings so the LLM can narrate what's happening.
-The actual work happens in background tasks that stream events + mentions to
-Convex. The frontend subscribes to those tables and injects findings into the
-chat as Rachel's own messages.
+PIPELINE B — MARKETING CAMPAIGN (one-shot):
+- `create_marketing_campaign(brief, ...)` — invoke `campaign.run_campaign_pipeline`,
+                                    which fans out competitor intel + trending
+                                    hooks + (optional) social pulse + brand
+                                    context, synthesizes a campaign markdown,
+                                    persists it under `data/campaigns/`, and
+                                    fires DM-automation proposals.
+
+Tools return short status strings so the LLM can narrate. Heavy work runs in
+background tasks that stream events + mentions to Convex; the frontend
+subscribes and injects findings into the chat as Rachel's own messages.
 """
 
 from __future__ import annotations
@@ -18,8 +34,12 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
+from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 
+import campaign
 import convex_client as cx
 import scraper_stream
 import supervised_agent
@@ -28,6 +48,197 @@ logger = logging.getLogger("uvicorn.error")
 
 # participant -> active agentRuns _id (Convex doc id)
 _active_run_by_participant: dict[str, str] = {}
+# participant -> active company name (for note_user_comment defaulting)
+_active_company_by_participant: dict[str, str] = {}
+
+# Local persistence for tracked companies. Mirrors campaign.CAMPAIGNS_DIR
+# layout. `nia local sync` (fired via campaign._trigger_nia_sync) picks it up.
+ROOT = Path(__file__).resolve().parent
+DATA_DIR = (ROOT / ".." / "data").resolve()
+TRACKED_DIR = DATA_DIR / "tracked"
+
+
+def _slugify(text: str, max_len: int = 50) -> str:
+    s = re.sub(r"[^a-z0-9]+", "-", (text or "").lower()).strip("-")
+    return (s or "tracked")[:max_len]
+
+
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+# ── Tracking-file editing helpers ─────────────────────────────────────────────
+#
+# Files live at `data/tracked/{slug}.md` (one per company). Re-tracking the
+# same company UPSERTS into the existing file rather than creating a new one.
+# Body sections accumulate over time:
+#   ## Sources       — every URL the user has supplied for this company
+#   ## Runs          — audit trail of when tracking was fired + by whom
+#   ## User comments — opinions / takes / context the user has shared
+#
+# Frontmatter is HTML comments at the top: company, slug, first_tracked,
+# last_tracked, runs (count), last_comment_at. Update via _set_frontmatter.
+
+
+_FRONTMATTER_RE = re.compile(r"^<!--\s*(\w+):\s*(.*?)\s*-->", re.MULTILINE)
+
+
+def _set_frontmatter(text: str, key: str, value: str) -> str:
+    """Update a `<!-- key: value -->` line, or insert into the frontmatter block."""
+    pattern = re.compile(rf"<!--\s*{re.escape(key)}:\s*[^>]*?\s*-->")
+    repl = f"<!-- {key}: {value} -->"
+    if pattern.search(text):
+        return pattern.sub(repl, text, count=1)
+    # Append to the end of the leading frontmatter block.
+    m = re.match(r"\A(?:<!--[^\n]*-->\n)+", text)
+    if m:
+        return text[:m.end()] + repl + "\n" + text[m.end():]
+    return repl + "\n" + text
+
+
+def _bump_frontmatter_int(text: str, key: str) -> str:
+    pattern = re.compile(rf"<!--\s*{re.escape(key)}:\s*(\d+)\s*-->")
+    m = pattern.search(text)
+    if m:
+        bumped = int(m.group(1)) + 1
+        return pattern.sub(f"<!-- {key}: {bumped} -->", text, count=1)
+    return _set_frontmatter(text, key, "1")
+
+
+def _append_to_section(text: str, section_name: str, line: str) -> str:
+    """Append `line` to `## section_name`. Section is created at end if absent."""
+    line = line.rstrip()
+    header = f"## {section_name}"
+    if header not in text:
+        sep = "" if text.endswith("\n\n") else ("\n" if text.endswith("\n") else "\n\n")
+        return text + sep + f"{header}\n{line}\n"
+    start = text.index(header) + len(header)
+    rest = text[start:]
+    nxt = rest.find("\n## ")
+    end = len(text) if nxt == -1 else start + nxt
+    section_body = text[start:end].rstrip("\n").rstrip()
+    new_body = f"{section_body}\n{line}\n" if section_body else f"\n{line}\n"
+    return text[:start] + new_body + text[end:]
+
+
+def _new_tracked_file_text(
+    *, company: str, slug: str, link: str, run_id: str,
+    participant: str, now: str,
+) -> str:
+    return (
+        f"<!-- company: {company} -->\n"
+        f"<!-- slug: {slug} -->\n"
+        f"<!-- first_tracked: {now} -->\n"
+        f"<!-- last_tracked: {now} -->\n"
+        f"<!-- runs: 1 -->\n\n"
+        f"# Tracking: {company}\n\n"
+        f"## Sources\n- {link}\n\n"
+        f"## Runs\n- {now} — run_id={run_id}, by {participant}\n\n"
+        f"## User comments\n"
+    )
+
+
+def _persist_tracked_company(
+    *, company: str, link: str, run_id: str, participant: str,
+) -> Path:
+    """Upsert: edit `data/tracked/{slug}.md` for this company, or create it.
+
+    Re-tracking the same company NEVER creates a duplicate file — it
+    appends a new entry under `## Runs`, adds the URL to `## Sources` if
+    it's new, and bumps last_tracked + runs in frontmatter.
+    """
+    TRACKED_DIR.mkdir(parents=True, exist_ok=True)
+    slug = _slugify(company)
+    path = TRACKED_DIR / f"{slug}.md"
+    now = _now_iso()
+
+    if path.exists():
+        text = path.read_text(encoding="utf-8")
+        text = _set_frontmatter(text, "last_tracked", now)
+        text = _bump_frontmatter_int(text, "runs")
+        text = _append_to_section(
+            text, "Runs", f"- {now} — run_id={run_id}, by {participant}",
+        )
+        if link and f"- {link}" not in text:
+            text = _append_to_section(text, "Sources", f"- {link}")
+    else:
+        text = _new_tracked_file_text(
+            company=company, slug=slug, link=link,
+            run_id=run_id, participant=participant, now=now,
+        )
+
+    path.write_text(text, encoding="utf-8")
+    campaign._trigger_nia_sync()
+    return path
+
+
+def _append_user_comment(
+    *, company: str, comment: str, participant: str,
+) -> Path | None:
+    """Append a `## User comments` line to the company's tracking file.
+
+    Returns the file path on success, or None if no tracking file exists for
+    the company yet (caller decides whether to seed one).
+    """
+    slug = _slugify(company)
+    path = TRACKED_DIR / f"{slug}.md"
+    if not path.exists():
+        return None
+    now = _now_iso()
+    safe = comment.strip().replace("\n", " ")
+    line = f'- {now} — "{safe}" (by {participant})'
+    text = path.read_text(encoding="utf-8")
+    text = _append_to_section(text, "User comments", line)
+    text = _set_frontmatter(text, "last_comment_at", now)
+    path.write_text(text, encoding="utf-8")
+    campaign._trigger_nia_sync()
+    return path
+
+
+def _summarize_tracked_record(path: Path) -> dict[str, Any]:
+    """Parse a tracked file into a compact summary for list_tracked_topics."""
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError:
+        return {"file": path.name, "error": "unreadable"}
+    meta: dict[str, str] = {}
+    for k, v in _FRONTMATTER_RE.findall(text):
+        meta[k] = v
+    # First URL = first bullet under ## Sources.
+    first_url = ""
+    src = re.search(r"^##\s+Sources\s*\n((?:.+\n?)+?)(?=\n##\s|\Z)", text, re.MULTILINE)
+    if src:
+        m = re.search(r"^-\s*(\S+)", src.group(1), re.MULTILINE)
+        if m:
+            first_url = m.group(1).strip()
+    # Comment count = number of "- " lines under ## User comments.
+    comment_count = 0
+    cmt = re.search(r"^##\s+User comments\s*\n((?:.+\n?)*?)(?=\n##\s|\Z)", text, re.MULTILINE)
+    if cmt:
+        comment_count = sum(1 for ln in cmt.group(1).splitlines() if ln.strip().startswith("-"))
+    return {
+        "file": path.name,
+        "company": meta.get("company", ""),
+        "slug": meta.get("slug", ""),
+        "first_url": first_url,
+        "first_tracked": meta.get("first_tracked", ""),
+        "last_tracked": meta.get("last_tracked", ""),
+        "runs": int(meta.get("runs", "1") or "1"),
+        "user_comment_count": comment_count,
+        "last_comment_at": meta.get("last_comment_at", ""),
+    }
+
+
+def _read_tracked_records(*, max_records: int = 25) -> list[dict[str, Any]]:
+    """Scan `data/tracked/*.md`. Most-recently-tracked first."""
+    if not TRACKED_DIR.exists():
+        return []
+    files = sorted(
+        TRACKED_DIR.glob("*.md"),
+        key=lambda p: p.stat().st_mtime,
+        reverse=True,
+    )[:max_records]
+    return [_summarize_tracked_record(p) for p in files]
 
 
 def get_active_run(participant: str) -> str | None:
@@ -230,6 +441,117 @@ TOOL_DEFS: list[dict[str, Any]] = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "list_tracked_topics",
+            "description": (
+                "Returns the list of companies / topics the user has asked "
+                "to track recently (most recent first). Use this when the "
+                "user asks 'what are you tracking?', 'what topics are you "
+                "watching?', 'what other things are you on?', etc. Reads "
+                "from the local data/tracked/ folder which is mirrored "
+                "into Nia. Returns JSON: {count, topics[{company, slug, "
+                "first_url, first_tracked, last_tracked, runs, "
+                "user_comment_count, last_comment_at}]}."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {},
+                "additionalProperties": False,
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "note_user_comment",
+            "description": (
+                "Save the user's opinion / take / reaction about a tracked "
+                "company. Call this whenever the user expresses a "
+                "subjective view, sentiment, prediction, or piece of "
+                "context about a company they're tracking — even casual "
+                "ones ('ngl their pricing is wild', 'i actually like the "
+                "new model', 'wait that announcement was sus'). The "
+                "comment is appended under '## User comments' in the "
+                "company's tracking file so you and Nia can recall it "
+                "later (e.g. 'u said earlier u didnt trust their "
+                "privacy stuff'). Do NOT call for purely procedural "
+                "messages ('yes', 'ok', 'thanks'), pasted links, or "
+                "questions to you. Quietly save AND keep replying in "
+                "your normal voice — never announce that you saved it."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "comment": {
+                        "type": "string",
+                        "description": "The user's exact words or short paraphrase, <=240 chars.",
+                    },
+                    "company": {
+                        "type": "string",
+                        "description": (
+                            "Optional company name. Defaults to the active "
+                            "tracked company for this conversation."
+                        ),
+                    },
+                },
+                "required": ["comment"],
+                "additionalProperties": False,
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "create_marketing_campaign",
+            "description": (
+                "DIFFERENT PIPELINE — call this when the user wants a "
+                "MARKETING CAMPAIGN built (not live tracking). Triggers on "
+                "phrases like 'make a campaign', 'create a marketing "
+                "campaign', 'build me a campaign for my product', etc. "
+                "Runs the full multi-subagent pipeline (Reacher competitor "
+                "intel + trending hooks + brand context + optional social "
+                "pulse), synthesizes a campaign markdown, persists it, and "
+                "proposes DM automations + creator scripts. Takes 30-120s. "
+                "Returns a JSON summary with campaign_name, saved_to, and "
+                "which subagents ran."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "brief": {
+                        "type": "string",
+                        "description": (
+                            "Free-text marketing brief, e.g. 'Make a campaign "
+                            "for a tinted lip oil'. Should describe the product."
+                        ),
+                    },
+                    "brand_name": {
+                        "type": "string",
+                        "description": "Brand commissioning the campaign. Defaults to 'Aroma Cloud'.",
+                    },
+                    "include_social_pulse": {
+                        "type": "boolean",
+                        "description": (
+                            "Adds a 4th subagent that scrapes live posts from "
+                            "TikTok / X / Reddit / LinkedIn. Adds 30-90s. Default false."
+                        ),
+                    },
+                    "publish_scripts": {
+                        "type": "boolean",
+                        "description": (
+                            "When true, publishes generated creator scripts to "
+                            "the Notion Scripts page (NOTION_API_KEY required). "
+                            "Default false."
+                        ),
+                    },
+                },
+                "required": ["brief"],
+                "additionalProperties": False,
+            },
+        },
+    },
 ]
 
 
@@ -264,6 +586,17 @@ async def _track_company(args: dict[str, Any], *, participant: str) -> str:
 
     run_id = await cx.create_run(participant, company, link)
     _active_run_by_participant[participant] = run_id
+    _active_company_by_participant[participant] = company
+
+    # Upsert a Nia-indexed record. Re-tracking the same company never makes
+    # a duplicate file — appends to ## Runs / ## Sources instead.
+    try:
+        saved_to = _persist_tracked_company(
+            company=company, link=link, run_id=run_id, participant=participant,
+        )
+        logger.info("persisted tracking record: %s", saved_to)
+    except Exception as exc:
+        logger.warning("failed to persist tracking record: %s", exc)
 
     # Auto-spawn 4 supervised browser agents (one per platform) for this
     # company. Best-effort: cap-limited platforms get reported as skipped.
@@ -278,6 +611,86 @@ async def _track_company(args: dict[str, Any], *, participant: str) -> str:
         f"agents: {spawn_summary}. "
         "use screenshot / redirect / close / spawn to control them."
     )
+
+
+async def _note_user_comment(
+    args: dict[str, Any], *, participant: str,
+) -> str:
+    """Save a user opinion / reaction to the active tracked company's file."""
+    comment = (args.get("comment") or "").strip()
+    if not comment:
+        return "error: comment is required"
+
+    company = (args.get("company") or "").strip()
+    if not company:
+        company = _active_company_by_participant.get(participant, "")
+    if not company:
+        return "error: no active tracked company; pass company explicitly or call track_company first"
+
+    try:
+        path = _append_user_comment(
+            company=company, comment=comment, participant=participant,
+        )
+    except Exception as exc:
+        logger.exception("note_user_comment failed")
+        return f"error: {exc}"
+
+    if path is None:
+        return f"error: no tracked file for {company}; call track_company first"
+    return f"saved comment to {path.name}"
+
+
+async def _list_tracked_topics(args: dict[str, Any], *, participant: str) -> str:
+    """Return the recently-tracked companies, their first URL, and comment counts."""
+    records = _read_tracked_records()
+    if not records:
+        return "no tracked topics yet"
+    return json.dumps({"count": len(records), "topics": records})
+
+
+async def _create_marketing_campaign(
+    args: dict[str, Any], *, participant: str,
+) -> str:
+    """Run the full marketing-campaign pipeline. Returns short status for the LLM."""
+    brief = (args.get("brief") or "").strip()
+    if not brief:
+        return "error: brief is required"
+
+    # Optional knobs — default off for the heavy ones so the call stays fast.
+    include_social_pulse = bool(args.get("include_social_pulse"))
+    publish_scripts = bool(args.get("publish_scripts"))
+    brand_name = (args.get("brand_name") or "Aroma Cloud").strip() or "Aroma Cloud"
+
+    try:
+        result = await campaign.run_campaign_pipeline(
+            brief,
+            include_social_pulse=include_social_pulse,
+            publish_scripts=publish_scripts,
+            brand_name=brand_name,
+        )
+    except Exception as exc:
+        logger.exception("create_marketing_campaign failed")
+        return f"error: {exc}"
+
+    # Pluck a short campaign name out of the markdown for the LLM to confirm.
+    md = result.get("campaign_markdown") or ""
+    name_match = re.search(r"^#\s+Campaign:\s+(.+?)\s*$", md, flags=re.MULTILINE)
+    campaign_name = (name_match.group(1).strip() if name_match else "(untitled)")[:120]
+
+    summary = {
+        "campaign_name": campaign_name,
+        "extracted_query": result.get("extracted_query"),
+        "saved_to": result.get("saved_to"),
+        "subagents_run": list((result.get("subagents") or {}).keys()),
+        "scripts_published_to_notion": (
+            (result.get("scripts") or {}).get("published") if isinstance(result.get("scripts"), dict) else False
+        ),
+        "automation_status": (
+            (result.get("automations") or {}).get("dm", {}).get("status")
+            if isinstance(result.get("automations"), dict) else None
+        ),
+    }
+    return json.dumps(summary)
 
 
 async def _screenshot(args: dict[str, Any], *, participant: str) -> str:
@@ -373,6 +786,7 @@ async def _search_linkedin(args: dict[str, Any], *, participant: str) -> str:
 
 
 _HANDLERS = {
+    # Tracking pipeline
     "track_company": _track_company,
     "search_reddit": _search_reddit,
     "search_x": _search_x,
@@ -381,4 +795,8 @@ _HANDLERS = {
     "redirect": _redirect,
     "close": _close,
     "spawn": _spawn,
+    "list_tracked_topics": _list_tracked_topics,
+    "note_user_comment": _note_user_comment,
+    # Marketing campaign pipeline
+    "create_marketing_campaign": _create_marketing_campaign,
 }

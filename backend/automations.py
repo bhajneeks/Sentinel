@@ -33,6 +33,7 @@ from __future__ import annotations
 import logging
 import os
 import re
+import uuid
 from datetime import datetime, timezone
 from typing import Any
 
@@ -77,8 +78,11 @@ def _truthy(v: str | None) -> bool:
 async def _request(
     method: str, path: str, *, json_body: dict | None = None,
     params: dict | None = None, shop_id: str | None = None,
+    extra_headers: dict[str, str] | None = None,
 ) -> Any:
     headers = reacher._headers(shop_id)
+    if extra_headers:
+        headers.update(extra_headers)
     async with httpx.AsyncClient(
         base_url=reacher.REACHER_BASE_URL, timeout=30.0, headers=headers,
     ) as client:
@@ -138,9 +142,17 @@ async def get_filters(*, shop_region: str = "US", shop_id: str | None = None) ->
 # ---------------------------------------------------------------------------
 
 
-async def _gated_post(path: str, payload: dict, *, shop_id: str | None,
-                       label: str) -> dict:
-    """Centralized gate: enabled? dry-run? otherwise POST."""
+async def _gated_post(
+    path: str, payload: dict, *, shop_id: str | None,
+    label: str, extra_headers: dict[str, str] | None = None,
+) -> dict:
+    """Centralized gate: enabled? dry-run? otherwise POST.
+
+    Two layers of dry-run:
+      * `AUTOMATIONS_DRY_RUN=true` (env)  — we never even hit Reacher.
+      * `X-Dry-Run: true` (header)        — Reacher validates without persisting.
+        Triggered by including `X-Dry-Run` in `extra_headers`.
+    """
     enabled = is_enabled()
     dry_run = is_dry_run()
     plan = {
@@ -153,10 +165,13 @@ async def _gated_post(path: str, payload: dict, *, shop_id: str | None,
         logger.info("[automations] %s: AUTOMATIONS_ENABLED=false, returning plan only", label)
         return {"status": "skipped_disabled", **plan}
     if dry_run:
-        logger.info("[automations] %s: dry-run, payload logged", label)
+        logger.info("[automations] %s: env dry-run, payload logged", label)
         return {"status": "dry_run", **plan}
     logger.info("[automations] %s: POSTing to %s", label, path)
-    response = await _request("POST", path, json_body=payload, shop_id=shop_id)
+    response = await _request(
+        "POST", path, json_body=payload,
+        shop_id=shop_id, extra_headers=extra_headers,
+    )
     return {"status": "submitted", "response": response, **plan}
 
 
@@ -183,12 +198,27 @@ async def stop_automation(
 # ---------------------------------------------------------------------------
 
 
-# Default outreach template. {creator_name}, {hook}, {brand} substituted in.
+# Default outreach template. Uses Reacher's runtime templating placeholders
+# (Reacher renders per creator at delivery time). Local pre-render is kept in
+# `_meta.local_render_preview` for inspection only.
 DEFAULT_DM_TEMPLATE = (
     "Hi {creator_name} — we're {brand}, and we loved your recent content. "
     "{hook} If you'd be open to trying a sample, we'd love to send you "
     "one. No obligation, full creative freedom. Worth a chat?"
 )
+
+# Sensible defaults for the AutomationSchedule blob. Reacher's exact schema
+# wasn't published as an OpenAPI link we can introspect — these mirror the
+# minimum fields the portal sends and will be tightened once we can validate
+# against Reacher with a write-scoped key + X-Dry-Run.
+DEFAULT_DM_SCHEDULE: dict[str, Any] = {
+    "daily_cap": 25,
+    "timezone": "America/Los_Angeles",
+}
+
+# X-Created-Via header value — surfaced in Reacher's audit log so writes
+# from Nozomio are distinguishable from portal / other API clients.
+CREATED_VIA = "nozomio-orchestrator"
 
 
 def _slugify(text: str, max_len: int = 50) -> str:
@@ -257,14 +287,59 @@ def build_dm_payload(
     template: str = DEFAULT_DM_TEMPLATE,
     automation_name: str | None = None,
     max_creators: int = 50,
+    schedule: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Assemble the JSON body for a Create-DM-Automation request."""
-    targets = _extract_creator_targets(intel)[:max_creators]
-    hook = _first_hook(campaign_md) or "We've been following your work and think you'd vibe with what we're building."
+    """Build the body for `POST /automations/dm` (Reacher spec).
 
-    rendered_messages = []
-    for t in targets:
-        rendered_messages.append({
+    Shape (per Reacher docs — see `backend/test_dm_schema.py` for live
+    validation):
+
+        {
+          "automation_name": str (1-120),
+          "mode": "vanilla" | "with_image" | "with_product_card" | "spark_code",
+          "messages": [<MessageAddon>, ...]   # 1-5 items, polymorphic by `type`
+          "schedule": {<AutomationSchedule>}, # daily caps + run window
+          "creators_to_include": {            # mutually-exclusive modes
+            "list_upload": [{creator_id, handle}, ...]
+          },
+          # optional: creators_to_exclude, follow_ups, dm_config, end_date,
+          # is_evergreen, ai_enabled, business_hours_timezone
+        }
+
+    The `_meta` block is local-only metadata (preview render, hook, brand)
+    and is NOT part of Reacher's spec — strip it before posting if Reacher's
+    validator is strict about extra fields. Today we leave it in because the
+    error path is informative ("unknown field" beats silent drop).
+    """
+    targets = _extract_creator_targets(intel)[:max_creators]
+    hook = _first_hook(campaign_md) or (
+        "We've been following your work and think you'd vibe with what we're building."
+    )
+
+    body = template.format(
+        # Per Reacher's docs the runtime substitutes per-creator at send time.
+        # We pass the placeholder verbatim so it survives into Reacher's
+        # template engine. If Reacher's syntax differs (e.g. {{name}}), this
+        # is the line to adjust once we can validate.
+        creator_name="{creator_name}",
+        hook=hook,
+        brand=brand_name,
+    )
+
+    name = automation_name or (
+        f"Campaign DM "
+        f"{datetime.now(timezone.utc).strftime('%Y%m%d-%H%M%S')} - {_slugify(brand_name)}"
+    )
+
+    list_upload = [
+        {"creator_id": t["creator_id"], "handle": t["handle"]}
+        for t in targets
+        if t.get("creator_id") or t.get("handle")
+    ]
+
+    # Local preview render — useful for the campaign UI and dry-run inspection.
+    local_render_preview = [
+        {
             "creator_id": t["creator_id"],
             "handle": t["handle"],
             "message": template.format(
@@ -272,39 +347,47 @@ def build_dm_payload(
                 hook=hook,
                 brand=brand_name,
             ),
-        })
+        }
+        for t in targets
+    ]
 
-    name = automation_name or (
-        f"Campaign DM "
-        f"{datetime.now(timezone.utc).strftime('%Y%m%d-%H%M%S')} - {_slugify(brand_name)}"
-    )
     return {
         "automation_name": name,
-        "automation_type": "Message",
-        "creators": [
-            {
-                "creator_id": t["creator_id"],
-                "handle": t["handle"],
-            }
-            for t in targets
-            if t.get("creator_id") or t.get("handle")
-        ],
-        "message_template": template,
-        "rendered_messages": rendered_messages,
+        "mode": "vanilla",
+        "messages": [{"type": "text", "body": body}],
+        "schedule": schedule or DEFAULT_DM_SCHEDULE,
+        "creators_to_include": {"list_upload": list_upload},
         "_meta": {
             "brand": brand_name,
             "hook_used": hook,
-            "target_count": len(targets),
+            "target_count": len(list_upload),
+            "local_render_preview": local_render_preview,
         },
     }
 
 
 async def create_dm_automation(
     payload: dict[str, Any], *, shop_id: str | None = None,
+    reacher_dry_run: bool = False, idempotency_key: str | None = None,
 ) -> dict:
+    """Submit (or gate) the create-DM request.
+
+    `reacher_dry_run=True` adds Reacher's `X-Dry-Run: true` header — the
+    request is validated server-side but no automation is persisted. Useful
+    for schema verification independent of our local AUTOMATIONS_* env gates.
+
+    `idempotency_key` defaults to a fresh UUID so retries don't double-post.
+    """
+    headers: dict[str, str] = {
+        "Idempotency-Key": idempotency_key or str(uuid.uuid4()),
+        "X-Created-Via": CREATED_VIA,
+    }
+    if reacher_dry_run:
+        headers["X-Dry-Run"] = "true"
     return await _gated_post(
         AUTOMATION_DM_CREATE_PATH, payload,
         shop_id=shop_id, label="create_dm",
+        extra_headers=headers,
     )
 
 
@@ -319,11 +402,16 @@ async def propose_automations_for_campaign(
     template: str = DEFAULT_DM_TEMPLATE,
     max_creators: int = 50,
     shop_id: str | None = None,
+    reacher_dry_run: bool = False,
 ) -> dict[str, Any]:
     """Build (and optionally fire) outreach automations from a campaign output.
 
     Currently builds:
       - DM outreach to every unique creator in `competitor_intel`
+
+    `reacher_dry_run=True` forwards Reacher's `X-Dry-Run` header on the
+    create call so we can validate the schema server-side without persisting
+    a sandboxed automation. Independent of our local AUTOMATIONS_* env gates.
 
     Future:
       - sample_request / target_collab / tc_cleanup helpers (see top of file)
@@ -344,18 +432,21 @@ async def propose_automations_for_campaign(
         max_creators=max_creators,
     )
 
-    if not dm_payload["creators"]:
+    if not dm_payload["creators_to_include"]["list_upload"]:
         return {
             "skipped": True,
             "reason": "no usable creator handles/ids in competitor_intel",
         }
 
-    dm_result = await create_dm_automation(dm_payload, shop_id=shop_id)
+    dm_result = await create_dm_automation(
+        dm_payload, shop_id=shop_id, reacher_dry_run=reacher_dry_run,
+    )
     return {
         "dm": dm_result,
         "config": {
             "enabled": is_enabled(),
             "dry_run": is_dry_run(),
+            "reacher_dry_run": reacher_dry_run,
             "creators_targeted": dm_payload["_meta"]["target_count"],
             "hook_used": dm_payload["_meta"]["hook_used"],
         },
