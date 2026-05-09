@@ -25,6 +25,7 @@ const forward = async (msg: IncomingMessage) => {
     chatKind: msg.chatKind,
     service: msg.service,
     createdAt: msg.createdAt.toISOString(),
+    direction: "inbound" as const,
   };
 
   try {

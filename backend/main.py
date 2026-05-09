@@ -1,15 +1,26 @@
 import asyncio
 import json
+import logging
+import uuid
 from collections import deque
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Literal
 
-from fastapi import FastAPI, Request
+from dotenv import load_dotenv
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from sse_starlette.sse import EventSourceResponse
 
-MAX_BUFFERED = 200
+import agent
+
+load_dotenv(".env.local")
+load_dotenv()  # fallback to .env
+
+logger = logging.getLogger("uvicorn.error")
+
+MAX_BUFFERED = 500
+HISTORY_FOR_REPLY = 12
 
 app = FastAPI()
 
@@ -21,18 +32,75 @@ app.add_middleware(
 )
 
 
+Direction = Literal["inbound", "outbound"]
+ChatKind = Literal["dm", "group", "unknown"]
+
+
 class Message(BaseModel):
     id: str
     text: str | None = None
     participant: str | None = None
     chatId: str | None = None
-    chatKind: Literal["dm", "group", "unknown"] = "unknown"
+    chatKind: ChatKind = "unknown"
     service: str | None = None
     createdAt: datetime
+    direction: Direction = "inbound"
+
+
+class ConversationSummary(BaseModel):
+    participant: str
+    chatKind: ChatKind
+    lastMessageAt: datetime
+    lastMessageText: str | None
+    lastDirection: Direction
+    messageCount: int
 
 
 messages: deque[Message] = deque(maxlen=MAX_BUFFERED)
 subscribers: set[asyncio.Queue[Message]] = set()
+closed_participants: set[str] = set()
+
+
+def broadcast(message: Message) -> None:
+    for queue in list(subscribers):
+        try:
+            queue.put_nowait(message)
+        except asyncio.QueueFull:
+            pass
+
+
+def conversation_history(participant: str, limit: int) -> list[tuple[str, str]]:
+    out: list[tuple[str, str]] = []
+    for m in messages:
+        if m.participant != participant or not m.text:
+            continue
+        out.append((m.direction, m.text))
+    return out[-limit:]
+
+
+async def _generate_and_broadcast(participant: str) -> None:
+    history = conversation_history(participant, HISTORY_FOR_REPLY)
+    if not history:
+        return
+    try:
+        reply_text = await agent.generate_reply(history)
+    except Exception as exc:  # network / auth / rate limit
+        logger.warning("agent reply failed: %s", exc)
+        return
+    if not reply_text:
+        return
+    reply = Message(
+        id=f"agent-{uuid.uuid4().hex[:12]}",
+        text=reply_text,
+        participant=participant,
+        chatId=None,
+        chatKind="dm",
+        service="agent",
+        createdAt=datetime.now(timezone.utc),
+        direction="outbound",
+    )
+    messages.append(reply)
+    broadcast(reply)
 
 
 @app.get("/api/hello")
@@ -45,15 +113,55 @@ def list_messages() -> list[Message]:
     return list(messages)
 
 
+@app.get("/api/conversations")
+def list_conversations() -> list[ConversationSummary]:
+    by_participant: dict[str, ConversationSummary] = {}
+    counts: dict[str, int] = {}
+    for m in messages:
+        if not m.participant:
+            continue
+        if m.participant in closed_participants:
+            continue
+        counts[m.participant] = counts.get(m.participant, 0) + 1
+        prev = by_participant.get(m.participant)
+        if prev is None or m.createdAt >= prev.lastMessageAt:
+            by_participant[m.participant] = ConversationSummary(
+                participant=m.participant,
+                chatKind=m.chatKind,
+                lastMessageAt=m.createdAt,
+                lastMessageText=m.text,
+                lastDirection=m.direction,
+                messageCount=0,
+            )
+    for participant, summary in by_participant.items():
+        summary.messageCount = counts[participant]
+    return sorted(
+        by_participant.values(), key=lambda c: c.lastMessageAt, reverse=True
+    )
+
+
+@app.post("/api/conversations/{participant}/close", status_code=204)
+def close_conversation(participant: str):
+    closed_participants.add(participant)
+
+
+@app.post("/api/conversations/{participant}/reopen", status_code=204)
+def reopen_conversation(participant: str):
+    closed_participants.discard(participant)
+
+
 @app.post("/api/messages/ingest", status_code=204)
 async def ingest_message(message: Message):
+    if message.participant in closed_participants:
+        closed_participants.discard(message.participant)
     messages.append(message)
-    for queue in list(subscribers):
-        # Drop on full so a slow client never blocks the watcher.
-        try:
-            queue.put_nowait(message)
-        except asyncio.QueueFull:
-            pass
+    broadcast(message)
+    if (
+        message.direction == "inbound"
+        and message.participant
+        and agent.is_configured()
+    ):
+        asyncio.create_task(_generate_and_broadcast(message.participant))
 
 
 @app.get("/api/messages/stream")
@@ -83,3 +191,8 @@ async def stream_messages(request: Request):
             subscribers.discard(queue)
 
     return EventSourceResponse(event_source())
+
+
+@app.get("/api/agent/status")
+def agent_status():
+    return {"configured": agent.is_configured()}

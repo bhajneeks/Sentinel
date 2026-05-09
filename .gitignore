@@ -3,12 +3,17 @@ backend/.venv/
 backend/__pycache__/
 backend/**/__pycache__/
 backend/**/*.pyc
+backend/.env*.local
 
 # Node / Next.js
 frontend/node_modules/
 frontend/.next/
 frontend/out/
 frontend/.env*.local
+
+# Bridge (Bun)
+bridge/node_modules/
+bridge/.env*.local
 
 # OS
 .DS_Store
