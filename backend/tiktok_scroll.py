@@ -36,6 +36,7 @@ from urllib.parse import quote
 from browser_use_common import (
     DEFAULT_PROFILE_NAME,
     add_common_args,
+    parse_json_array,
     run_login_session,
     run_scrape,
     run_scrape_collect,
@@ -101,20 +102,6 @@ def build_task(scrolls: int, query: str | None) -> tuple[str, str]:
     return start_url, task
 
 
-def _parse_json_array(raw: str | None) -> list[dict[str, Any]]:
-    """Browser-Use sometimes wraps the JSON in commentary. Pull the first array out."""
-    if not raw:
-        return []
-    m = re.search(r"\[[\s\S]*\]", raw)
-    if not m:
-        return []
-    try:
-        data = json.loads(m.group(0))
-    except json.JSONDecodeError:
-        return []
-    return data if isinstance(data, list) else []
-
-
 async def scrape(
     query: str | None = None,
     *,
@@ -143,7 +130,7 @@ async def scrape(
     return {
         "platform": "tiktok",
         "query": query,
-        "items": _parse_json_array(raw),
+        "items": parse_json_array(raw),
         "raw": raw,
         "success": success,
     }

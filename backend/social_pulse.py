@@ -148,14 +148,22 @@ HARD RULES:
 
 
 def _slim_results_for_llm(pulse: dict[str, Any]) -> dict[str, Any]:
-    """Drop the verbose `raw` field — the model only needs `items`."""
+    """Compact view of the pulse: items + a small raw preview for debugging."""
     slim: dict[str, Any] = {"topic": pulse.get("topic"), "platforms": {}}
     for platform, res in (pulse.get("results") or {}).items():
-        slim["platforms"][platform] = {
+        items = res.get("items") or []
+        entry: dict[str, Any] = {
             "success": res.get("success"),
-            "items": res.get("items") or [],
-            **({"error": res["error"]} if res.get("error") else {}),
+            "items": items,
         }
+        if res.get("error"):
+            entry["error"] = res["error"]
+        # When the parser found nothing, keep a short raw preview so the
+        # caller can see what the agent actually returned.
+        if not items and res.get("raw"):
+            raw = res["raw"]
+            entry["raw_preview"] = raw[:600] + ("…" if len(raw) > 600 else "")
+        slim["platforms"][platform] = entry
     return slim
 
 
