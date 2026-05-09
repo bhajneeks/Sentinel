@@ -204,7 +204,7 @@ function MentionBubble({
 }) {
   const m = message.mention;
   if (!m) return null;
-  const meta = PLATFORM_META[m.platform];
+  const meta = PLATFORM_META[m.platform] ?? FALLBACK_META;
   const snippet =
     m.postText.length > 240 ? `${m.postText.slice(0, 240).trim()}…` : m.postText;
 
