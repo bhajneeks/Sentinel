@@ -25,4 +25,11 @@ cd frontend
 npm run dev
 ```
 
+photon
+```sh
+cd bridge
+bun install
+bun run start
+```
+
 Then visit http://localhost:3000 — the page renders the message returned by the FastAPI endpoint.
