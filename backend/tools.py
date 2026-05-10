@@ -703,6 +703,13 @@ async def _create_marketing_campaign(
     raw_brand = (args.get("brand_name") or "").strip()
     brand_name = raw_brand if raw_brand else None
 
+    # Track the campaign on the dashboard. The row is in 'building' state
+    # for the entire pipeline (~30-120s) so users see something is
+    # actually happening before the Notion link arrives.
+    campaign_run_id = await cx.start_campaign_run(
+        participant=participant, brief=brief, brand_name=brand_name,
+    )
+
     try:
         result = await campaign.run_campaign_pipeline(
             brief,
@@ -712,6 +719,10 @@ async def _create_marketing_campaign(
         )
     except Exception as exc:
         logger.exception("create_marketing_campaign failed")
+        if campaign_run_id:
+            await cx.finish_campaign_run(
+                campaign_run_id, status="error", error=str(exc),
+            )
         return f"error: {exc}"
 
     # Pluck a short campaign name out of the markdown for the LLM to confirm.
@@ -739,6 +750,26 @@ async def _create_marketing_campaign(
             if isinstance(result.get("automations"), dict) else None
         ),
     }
+
+    # Mark the campaign ready (or errored if Notion publish failed) so
+    # the dashboard pill flips from "building..." to "ready, click to open".
+    if campaign_run_id:
+        page_url = notion_block.get("page_url") if isinstance(notion_block, dict) else None
+        if page_url:
+            await cx.finish_campaign_run(
+                campaign_run_id,
+                status="ready",
+                notion_page_url=page_url,
+                campaign_name=campaign_name,
+            )
+        else:
+            await cx.finish_campaign_run(
+                campaign_run_id,
+                status="error" if notion_block.get("error") else "ready",
+                campaign_name=campaign_name,
+                error=notion_block.get("error") or notion_block.get("reason"),
+            )
+
     return json.dumps(summary)
 
 

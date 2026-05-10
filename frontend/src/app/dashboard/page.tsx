@@ -273,7 +273,7 @@ function DashboardInner() {
               <span className="absolute inset-0 rounded-full bg-violet-400 shadow-[0_0_12px_rgba(167,139,250,0.9)]" />
               <span className="absolute inset-0 animate-ping rounded-full bg-violet-400/60" />
             </div>
-            <span className="font-medium text-sm tracking-tight">Spectrum</span>
+            <span className="font-medium text-sm tracking-tight">Sentinel</span>
             <span className="text-xs text-zinc-500">/ live console</span>
           </div>
           <div className="flex items-center gap-3 text-[11px]">
@@ -405,6 +405,15 @@ function SceneOverlayLive({ participant }: { participant: string | null }) {
       api.sessions.activeCloud,
       participant ? { participant } : "skip",
     ) ?? [];
+  const recentCampaigns =
+    useQuery(
+      api.campaignRuns.forParticipant,
+      participant ? { participant, limit: 1 } : "skip",
+    ) ?? [];
+  const latestCampaign = recentCampaigns[0] ?? null;
+  const activeBuild = latestCampaign?.status === "building" ? latestCampaign : null;
+  const lastReady =
+    latestCampaign && latestCampaign.status === "ready" ? latestCampaign : null;
   const [stopping, setStopping] = useState(false);
   const liveCount = sessions.length;
   const summary =
@@ -460,6 +469,41 @@ function SceneOverlayLive({ participant }: { participant: string | null }) {
           </div>
         </div>
       </div>
+      {(activeBuild || lastReady) && (
+        <div className="pointer-events-auto absolute top-16 right-4 flex max-w-[320px] flex-col gap-1">
+          {activeBuild && (
+            <div className="flex items-center gap-2 rounded-full bg-cyan-500/15 px-3 py-1.5 font-mono text-[11px] text-cyan-200 ring-1 ring-cyan-400/30 backdrop-blur shadow-[0_0_24px_rgba(34,211,238,0.18)]">
+              <span className="relative flex h-2 w-2">
+                <span className="absolute inset-0 animate-ping rounded-full bg-cyan-400/70" />
+                <span className="relative h-2 w-2 rounded-full bg-cyan-300" />
+              </span>
+              <span className="font-semibold uppercase tracking-wider">
+                campaign building
+              </span>
+              {activeBuild.subagent && (
+                <span className="text-cyan-300/70">· {activeBuild.subagent}</span>
+              )}
+            </div>
+          )}
+          {!activeBuild && lastReady?.notionPageUrl && (
+            <a
+              href={lastReady.notionPageUrl}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="flex items-center gap-2 rounded-full bg-emerald-500/15 px-3 py-1.5 font-mono text-[11px] text-emerald-200 ring-1 ring-emerald-400/30 backdrop-blur transition-colors hover:bg-emerald-500/25"
+            >
+              <span className="h-2 w-2 rounded-full bg-emerald-400 shadow-[0_0_8px_rgba(52,211,153,0.7)]" />
+              <span className="font-semibold uppercase tracking-wider">
+                campaign ready
+              </span>
+              <span className="truncate text-emerald-300/80">
+                {lastReady.campaignName ?? "open in notion"}
+              </span>
+              <span className="text-emerald-300/60">↗</span>
+            </a>
+          )}
+        </div>
+      )}
       <div className="flex items-end justify-between font-mono text-[10px] text-zinc-500">
         <div className="flex gap-3">
           <Legend dot="#ff4500" label="Reddit" />

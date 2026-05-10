@@ -200,6 +200,62 @@ async def log_supervisor_event(
         return None
 
 
+async def start_campaign_run(
+    *, participant: str, brief: str, brand_name: str | None = None,
+) -> str | None:
+    """Insert a `campaignRuns` row in `building` state. Returns the
+    Convex doc id, or None if Convex isn't configured."""
+    if not os.environ.get("CONVEX_URL"):
+        return None
+    args: dict[str, Any] = {"participant": participant, "brief": brief}
+    if brand_name:
+        args["brandName"] = brand_name
+    try:
+        client = get_client()
+        return await _run(client.mutation, "campaignRuns:start", args)
+    except Exception as exc:
+        logger.warning("campaignRuns:start failed: %s", exc)
+        return None
+
+
+async def set_campaign_subagent(run_id: str, subagent: str) -> None:
+    if not run_id:
+        return
+    try:
+        client = get_client()
+        await _run(
+            client.mutation,
+            "campaignRuns:setSubagent",
+            {"runId": run_id, "subagent": subagent},
+        )
+    except Exception as exc:
+        logger.debug("campaignRuns:setSubagent failed: %s", exc)
+
+
+async def finish_campaign_run(
+    run_id: str,
+    *,
+    status: str,
+    notion_page_url: str | None = None,
+    campaign_name: str | None = None,
+    error: str | None = None,
+) -> None:
+    if not run_id:
+        return
+    args: dict[str, Any] = {"runId": run_id, "status": status}
+    if notion_page_url:
+        args["notionPageUrl"] = notion_page_url
+    if campaign_name:
+        args["campaignName"] = campaign_name
+    if error:
+        args["error"] = error[:500]
+    try:
+        client = get_client()
+        await _run(client.mutation, "campaignRuns:finish", args)
+    except Exception as exc:
+        logger.warning("campaignRuns:finish failed: %s", exc)
+
+
 async def supervisor_events_for_session(session_id: str, limit: int = 25) -> list[dict[str, Any]]:
     """Fetch recent supervisor events for a session — used by the
     agentic revive flow to reason over prior diagnoses + outcomes."""
