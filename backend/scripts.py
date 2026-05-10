@@ -175,7 +175,7 @@ async def generate_scripts(
     context: dict[str, Any],
     pulse: dict[str, Any] | Exception | None = None,
     campaign_markdown: str | None = None,
-    brand_name: str = "Aroma Cloud",
+    brand_name: str = "Brand",
     count: int = 3,
 ) -> list[dict[str, Any]]:
     """Run the LLM and return the parsed `scripts` list."""
@@ -623,7 +623,7 @@ async def propose_scripts_for_campaign(
     context: dict[str, Any],
     pulse: dict[str, Any] | Exception | None = None,
     campaign_markdown: str = "",
-    brand_name: str = "Aroma Cloud",
+    brand_name: str = "Brand",
     count: int = 3,
     publish: bool = False,
     page_id: str | None = None,

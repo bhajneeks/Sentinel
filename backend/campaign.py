@@ -54,6 +54,39 @@ COMPANY_CONTEXT_FILES: tuple[str, ...] = (
 
 NIA = shutil.which("nia.cmd") or shutil.which("nia") or "nia"
 
+
+def get_default_brand_name() -> str:
+    """Extract the brand name from `data/brand-guide.md`'s top heading.
+
+    Looks for `# <Brand Name> — ...` or `# <Brand Name>` on the first
+    matching line. Falls back to a generic "Brand" if the file is
+    missing or unparseable. Stops Aroma Cloud (or any other brand) from
+    being hardcoded across the codebase — the brand-guide is the source
+    of truth.
+    """
+    guide = DATA_DIR / "brand-guide.md"
+    try:
+        text = guide.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return "Brand"
+    except OSError:
+        return "Brand"
+    for line in text.splitlines():
+        stripped = line.strip()
+        if not stripped.startswith("#"):
+            continue
+        # Strip leading hashes + whitespace
+        body = stripped.lstrip("#").strip()
+        if not body:
+            continue
+        # Take the part before the em-dash / hyphen separator if present
+        for sep in (" — ", " - ", " | ", ": "):
+            if sep in body:
+                body = body.split(sep, 1)[0].strip()
+                break
+        return body or "Brand"
+    return "Brand"
+
 PRODUCT_EXTRACTION_PROMPT = """You extract a TikTok Shop product search query
 from a marketing brief.
 
@@ -393,7 +426,7 @@ async def run_campaign_pipeline(
     publish_scripts: bool = False,
     scripts_count: int = 3,
     scripts_page_id: str | None = None,
-    brand_name: str = "Aroma Cloud",
+    brand_name: str | None = None,
 ) -> dict[str, Any]:
     """Orchestrator entry point — used by `POST /api/marketing-campaign`.
 
@@ -422,6 +455,10 @@ async def run_campaign_pipeline(
         gather_trending_hooks(query, shop_id=shop_id)
     )
     context = gather_company_context()
+
+    # Resolve brand name from brand-guide.md if caller didn't pass one.
+    if not brand_name:
+        brand_name = get_default_brand_name()
 
     pulse_task: asyncio.Task | None = None
     if include_social_pulse:

@@ -529,7 +529,11 @@ TOOL_DEFS: list[dict[str, Any]] = [
                     },
                     "brand_name": {
                         "type": "string",
-                        "description": "Brand commissioning the campaign. Defaults to 'Aroma Cloud'.",
+                        "description": (
+                            "Brand commissioning the campaign. Optional — if "
+                            "omitted, the pipeline pulls the brand name from "
+                            "data/brand-guide.md (the source of truth)."
+                        ),
                     },
                     "include_social_pulse": {
                         "type": "boolean",
@@ -548,6 +552,39 @@ TOOL_DEFS: list[dict[str, Any]] = [
                     },
                 },
                 "required": ["brief"],
+                "additionalProperties": False,
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "nia_search",
+            "description": (
+                "Look up context from the Nia-indexed `data/` folder. "
+                "Use this whenever you need to answer a question that "
+                "depends on past context: brand voice / 'do/don't' rules "
+                "(brand-guide.md), prior campaigns (campaigns/), or any "
+                "tracked-company history including Sources / Runs / User "
+                "comments (tracked/<slug>.md). Returns a YAML-ish list of "
+                "matching passages with file paths and scores. Always call "
+                "this BEFORE asking the user 'what brand?' or 'didn't we "
+                "say something about X?' — Nia probably already knows."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": (
+                            "A natural-language question or keywords. "
+                            "Examples: 'brand voice tone', 'past campaigns "
+                            "for lip oil', 'tracked anthropic recent posts', "
+                            "'user opinion on openai'."
+                        ),
+                    },
+                },
+                "required": ["query"],
                 "additionalProperties": False,
             },
         },
@@ -661,7 +698,10 @@ async def _create_marketing_campaign(
     # Rachel can text back as a single link.
     include_social_pulse = bool(args.get("include_social_pulse"))
     publish_scripts = bool(args.get("publish_scripts", True))
-    brand_name = (args.get("brand_name") or "Aroma Cloud").strip() or "Aroma Cloud"
+    # If the LLM passes a brand_name, honor it; otherwise let the
+    # campaign pipeline pull from data/brand-guide.md.
+    raw_brand = (args.get("brand_name") or "").strip()
+    brand_name = raw_brand if raw_brand else None
 
     try:
         result = await campaign.run_campaign_pipeline(
@@ -794,6 +834,61 @@ async def _search_linkedin(args: dict[str, Any], *, participant: str) -> str:
     )
 
 
+_NIA_TIMEOUT_S = 20
+
+
+async def _run_nia_query(query: str) -> tuple[int, str, str]:
+    """Run `nia search query <q> --local-folders data --fast --skip-llm`.
+
+    Uses asyncio.create_subprocess_exec — args are passed directly to the
+    process, no shell interpolation possible. Returns (returncode, stdout, stderr).
+    """
+    cmd = [
+        "nia", "search", "query", query,
+        "--local-folders", "data",
+        "--fast",
+        "--skip-llm",
+        "--no-color",
+    ]
+    proc = await asyncio.create_subprocess_exec(
+        *cmd,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    stdout_b, stderr_b = await asyncio.wait_for(
+        proc.communicate(), timeout=_NIA_TIMEOUT_S,
+    )
+    return (
+        proc.returncode or 0,
+        stdout_b.decode("utf-8", errors="replace"),
+        stderr_b.decode("utf-8", errors="replace"),
+    )
+
+
+async def _nia_search(args: dict[str, Any], *, participant: str) -> str:
+    """Query the Nia-indexed `data/` folder for context.
+
+    `data/` contains brand-guide.md, company-overview.md, campaigns/, and
+    tracked/ files. Use this to answer "what's our brand voice?", "what
+    have we tracked about X?", "didn't we say something about Y?".
+    """
+    query = (args.get("query") or "").strip()
+    if not query:
+        return "error: query is required"
+    try:
+        rc, out, err = await _run_nia_query(query)
+    except asyncio.TimeoutError:
+        return "error: nia search timed out"
+    except FileNotFoundError:
+        return "error: nia CLI not on PATH"
+    except Exception as exc:
+        return f"error: nia search failed: {exc}"
+    if rc != 0:
+        return f"error: nia returned {rc}: {err[:300]}"
+    out = out.strip()
+    return out[:6000] if len(out) > 6000 else (out or "(no results)")
+
+
 _HANDLERS = {
     # Tracking pipeline
     "track_company": _track_company,
@@ -808,4 +903,6 @@ _HANDLERS = {
     "note_user_comment": _note_user_comment,
     # Marketing campaign pipeline
     "create_marketing_campaign": _create_marketing_campaign,
+    # Cross-pipeline context lookup
+    "nia_search": _nia_search,
 }

@@ -366,10 +366,13 @@ class CampaignRequest(BaseModel):
             "page ID with or without dashes."
         ),
     )
-    brand_name: str = Field(
-        default="Aroma Cloud",
+    brand_name: str | None = Field(
+        default=None,
         max_length=120,
-        description="Brand commissioning the campaign — surfaces in DM template + Notion heading.",
+        description=(
+            "Brand commissioning the campaign. Optional — if omitted the "
+            "pipeline auto-loads the brand from data/brand-guide.md."
+        ),
     )
 
 

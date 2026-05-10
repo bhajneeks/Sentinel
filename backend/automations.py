@@ -283,7 +283,7 @@ def build_dm_payload(
     *,
     intel: dict[str, Any],
     campaign_md: str,
-    brand_name: str = "Aroma Cloud",
+    brand_name: str = "Brand",
     template: str = DEFAULT_DM_TEMPLATE,
     automation_name: str | None = None,
     max_creators: int = 50,
@@ -398,7 +398,7 @@ async def create_dm_automation(
 
 async def propose_automations_for_campaign(
     campaign_result: dict[str, Any], *,
-    brand_name: str = "Aroma Cloud",
+    brand_name: str = "Brand",
     template: str = DEFAULT_DM_TEMPLATE,
     max_creators: int = 50,
     shop_id: str | None = None,
