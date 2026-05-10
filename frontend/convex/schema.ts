@@ -88,6 +88,30 @@ export default defineSchema({
     .index("by_session", ["sessionId"])
     .index("by_run_ts", ["runId", "ts"]),
 
+  campaignRuns: defineTable({
+    /** iMessage participant whose request triggered the campaign. */
+    participant: v.string(),
+    /** The original brief Rachel forwarded to the pipeline. */
+    brief: v.string(),
+    brandName: v.optional(v.string()),
+    /** Lifecycle. `subagent` lets the dashboard show fine-grained
+     * progress ("running competitor intel...", "synthesizing campaign...",
+     * "publishing to notion..."). */
+    status: v.union(
+      v.literal("building"),
+      v.literal("ready"),
+      v.literal("error"),
+    ),
+    subagent: v.optional(v.string()),
+    notionPageUrl: v.optional(v.string()),
+    campaignName: v.optional(v.string()),
+    error: v.optional(v.string()),
+    startedAt: v.number(),
+    completedAt: v.optional(v.number()),
+  })
+    .index("by_participant_status", ["participant", "status"])
+    .index("by_participant_startedAt", ["participant", "startedAt"]),
+
   supervisorEvents: defineTable({
     /** iMessage participant the event belongs to (for tab-scoped views). */
     participant: v.optional(v.string()),
