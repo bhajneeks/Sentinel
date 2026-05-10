@@ -2,10 +2,8 @@
 
 import { Billboard, Float, Html, Line, OrbitControls, RoundedBox, Stars } from "@react-three/drei";
 import { Canvas, useFrame } from "@react-three/fiber";
-import { useQuery } from "convex/react";
 import { useMemo, useRef } from "react";
 import * as THREE from "three";
-import { api } from "../../../../convex/_generated/api";
 
 type Platform = {
   id: string;
@@ -83,6 +81,7 @@ type LiveSession = {
 
 type AgentSceneProps = {
   participant: string | null;
+  sessions?: any[];
 };
 
 function CoreNode() {
@@ -499,15 +498,8 @@ function makeExtraPlatform(session: LiveSession, index: number, total: number): 
   };
 }
 
-export default function AgentScene({ participant }: AgentSceneProps) {
-  // Hard scope to the selected participant. When none is selected we skip
-  // the query entirely so we never accidentally render another user's
-  // sessions on the active tab.
-  const cloudSessions =
-    useQuery(
-      api.sessions.activeCloud,
-      participant ? { participant } : "skip",
-    ) ?? [];
+export default function AgentScene({ participant, sessions }: AgentSceneProps) {
+  const cloudSessions = sessions ?? [];
 
   const { slotByPlatform, extras } = useMemo(() => {
     const grouped = new Map<string, LiveSession[]>();

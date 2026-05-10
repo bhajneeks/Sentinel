@@ -29,11 +29,14 @@ const AgentScene = dynamic(() => import("./_components/AgentScene"), {
 });
 
 export default function Dashboard() {
-  return (
-    <ConvexProvider client={convex}>
-      <DashboardInner />
-    </ConvexProvider>
-  );
+  if (convex) {
+    return (
+      <ConvexProvider client={convex}>
+        <DashboardInner />
+      </ConvexProvider>
+    );
+  }
+  return <DashboardInner />;
 }
 
 function DashboardInner() {
@@ -227,10 +230,9 @@ function DashboardInner() {
     [thinkingFor, activeParticipant],
   );
 
-  const liveMentions = useQuery(
-    api.mentions.byParticipant,
-    activeParticipant ? { participant: activeParticipant, limit: 50 } : "skip",
-  );
+  const [liveMentions, setLiveMentions] = useState<any[] | undefined>(undefined);
+  const [liveSessions, setLiveSessions] = useState<any[]>([]);
+  const [liveRecentCampaigns, setLiveRecentCampaigns] = useState<any[]>([]);
 
   const mergedMessages = useMemo(() => {
     if (!liveMentions || liveMentions.length === 0) return messages;
@@ -300,8 +302,20 @@ function DashboardInner() {
             />
           </section>
           <section className="relative flex-1 bg-[#05030f]">
-            <AgentScene participant={activeParticipant} />
-            <SceneOverlayLive participant={activeParticipant} />
+            <AgentScene participant={activeParticipant} sessions={liveSessions} />
+            {convex && (
+              <ConvexQueries
+                activeParticipant={activeParticipant}
+                onMentions={setLiveMentions}
+                onSessions={setLiveSessions}
+                onCampaigns={setLiveRecentCampaigns}
+              />
+            )}
+            <SceneOverlayLive
+              participant={activeParticipant}
+              sessions={liveSessions}
+              recentCampaigns={liveRecentCampaigns}
+            />
           </section>
         </div>
       </div>
@@ -399,17 +413,46 @@ function BackgroundGlow() {
   );
 }
 
-function SceneOverlayLive({ participant }: { participant: string | null }) {
-  const sessions =
-    useQuery(
-      api.sessions.activeCloud,
-      participant ? { participant } : "skip",
-    ) ?? [];
-  const recentCampaigns =
-    useQuery(
-      api.campaignRuns.forParticipant,
-      participant ? { participant, limit: 1 } : "skip",
-    ) ?? [];
+function ConvexQueries({
+  activeParticipant,
+  onMentions,
+  onSessions,
+  onCampaigns,
+}: {
+  activeParticipant: string | null;
+  onMentions: (m: any[]) => void;
+  onSessions: (s: any[]) => void;
+  onCampaigns: (c: any[]) => void;
+}) {
+  const mentions = useQuery(
+    api.mentions.byParticipant,
+    activeParticipant ? { participant: activeParticipant, limit: 50 } : "skip",
+  );
+  const sessions = useQuery(
+    api.sessions.activeCloud,
+    activeParticipant ? { participant: activeParticipant } : "skip",
+  );
+  const recentCampaigns = useQuery(
+    api.campaignRuns.forParticipant,
+    activeParticipant ? { participant: activeParticipant, limit: 1 } : "skip",
+  );
+
+  useEffect(() => { if (mentions !== undefined) onMentions(mentions); }, [mentions]);
+  useEffect(() => { if (sessions !== undefined) onSessions(sessions); }, [sessions]);
+  useEffect(() => { if (recentCampaigns !== undefined) onCampaigns(recentCampaigns); }, [recentCampaigns]);
+
+  return null;
+}
+
+function SceneOverlayLive({
+  participant,
+  sessions,
+  recentCampaigns,
+}: {
+  participant: string | null;
+  sessions: any[];
+  recentCampaigns: any[];
+}) {
   const latestCampaign = recentCampaigns[0] ?? null;
   const activeBuild = latestCampaign?.status === "building" ? latestCampaign : null;
   const lastReady =

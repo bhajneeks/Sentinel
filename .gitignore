@@ -18,6 +18,9 @@ frontend/.env*.local
 bridge/node_modules/
 bridge/.env*.local
 
+# Tracked company data (contains phone numbers)
+data/tracked/
+
 # OS
 .DS_Store
 
