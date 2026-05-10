@@ -345,13 +345,13 @@ class CampaignRequest(BaseModel):
         ),
     )
     publish_scripts: bool = Field(
-        default=False,
+        default=True,
         description=(
-            "Run the creator-script subagent. When true, generates "
-            "`scripts_count` short-form scripts AND appends them to the Notion "
-            "page (NOTION_API_KEY + NOTION_SCRIPTS_PAGE_ID required). When "
-            "false, scripts are still generated and returned in the response, "
-            "but NOT pushed to Notion."
+            "Run the creator-script subagent and publish the campaign + scripts "
+            "as a fresh child Notion page under NOTION_SCRIPTS_PAGE_ID "
+            "(NOTION_API_KEY required). Defaults to True so the response "
+            "always includes a `scripts.notion.page_url`. Set false to keep "
+            "the scripts local-only."
         ),
     )
     scripts_count: int = Field(
