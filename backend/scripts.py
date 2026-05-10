@@ -346,6 +346,228 @@ def _format_notion_blocks(
     return blocks
 
 
+_MD_BOLD_RE = re.compile(r"\*\*([^*]+?)\*\*")
+_MD_ITALIC_RE = re.compile(r"(?<!\*)\*([^*\n]+?)\*(?!\*)")
+_MD_CODE_RE = re.compile(r"`([^`\n]+?)`")
+_MD_LINK_RE = re.compile(r"\[([^\]]+)\]\((https?://[^)]+)\)")
+
+
+def _md_inline_to_rich(text: str) -> list[dict]:
+    """Parse a single line's inline markdown into Notion rich_text runs.
+    Handles **bold**, *italic*, `code`, and [text](url) links. Non-overlapping.
+    """
+    if not text:
+        return [_rich("")]
+
+    # Tokenize into spans without overlapping. Bold first (greediest), then
+    # links, then italic, then code.
+    spans: list[tuple[int, int, str, Any]] = []
+    used: list[tuple[int, int]] = []
+
+    def overlaps(s: int, e: int) -> bool:
+        return any(not (e <= us or s >= ue) for us, ue in used)
+
+    for m in _MD_BOLD_RE.finditer(text):
+        if not overlaps(m.start(), m.end()):
+            spans.append((m.start(), m.end(), "bold", m.group(1)))
+            used.append((m.start(), m.end()))
+    for m in _MD_LINK_RE.finditer(text):
+        if not overlaps(m.start(), m.end()):
+            spans.append((m.start(), m.end(), "link", (m.group(1), m.group(2))))
+            used.append((m.start(), m.end()))
+    for m in _MD_ITALIC_RE.finditer(text):
+        if not overlaps(m.start(), m.end()):
+            spans.append((m.start(), m.end(), "italic", m.group(1)))
+            used.append((m.start(), m.end()))
+    for m in _MD_CODE_RE.finditer(text):
+        if not overlaps(m.start(), m.end()):
+            spans.append((m.start(), m.end(), "code", m.group(1)))
+            used.append((m.start(), m.end()))
+
+    spans.sort(key=lambda x: x[0])
+    runs: list[dict] = []
+    cursor = 0
+    for start, end, kind, content in spans:
+        if start > cursor:
+            runs.append(_rich(text[cursor:start]))
+        if kind == "bold":
+            runs.append(_rich(content, bold=True))
+        elif kind == "italic":
+            runs.append(_rich(content, italic=True))
+        elif kind == "code":
+            runs.append(_rich(content, code=True))
+        elif kind == "link":
+            label, url = content
+            runs.append({
+                "type": "text",
+                "text": {"content": label, "link": {"url": url}},
+            })
+        cursor = end
+    if cursor < len(text):
+        runs.append(_rich(text[cursor:]))
+    return runs or [_rich(text)]
+
+
+def markdown_to_notion_blocks(md: str) -> list[dict]:
+    """Convert simple markdown to Notion blocks. Handles headings #/##/###,
+    bullets (- / *), numbered (1. 2.), and paragraphs. Skips tables and
+    nested lists (the campaign markdown doesn't use them)."""
+    blocks: list[dict] = []
+    if not md:
+        return blocks
+    lines = md.splitlines()
+    i = 0
+    while i < len(lines):
+        line = lines[i].rstrip()
+        stripped = line.lstrip()
+        if not stripped:
+            i += 1
+            continue
+
+        m = re.match(r"^(#{1,3})\s+(.*)$", stripped)
+        if m:
+            level = len(m.group(1))
+            blocks.append({
+                "object": "block",
+                "type": f"heading_{level}",
+                f"heading_{level}": {"rich_text": _md_inline_to_rich(m.group(2))},
+            })
+            i += 1
+            continue
+
+        m = re.match(r"^[-*]\s+(.*)$", stripped)
+        if m:
+            blocks.append({
+                "object": "block",
+                "type": "bulleted_list_item",
+                "bulleted_list_item": {"rich_text": _md_inline_to_rich(m.group(1))},
+            })
+            i += 1
+            continue
+
+        m = re.match(r"^\d+\.\s+(.*)$", stripped)
+        if m:
+            blocks.append({
+                "object": "block",
+                "type": "numbered_list_item",
+                "numbered_list_item": {"rich_text": _md_inline_to_rich(m.group(1))},
+            })
+            i += 1
+            continue
+
+        # Plain paragraph — accumulate adjacent non-blank, non-special lines.
+        para_lines = [stripped]
+        j = i + 1
+        while j < len(lines):
+            nxt = lines[j].rstrip().lstrip()
+            if not nxt:
+                break
+            if (re.match(r"^(#{1,3})\s+", nxt)
+                    or re.match(r"^[-*]\s+", nxt)
+                    or re.match(r"^\d+\.\s+", nxt)):
+                break
+            para_lines.append(nxt)
+            j += 1
+        para_text = " ".join(para_lines)
+        blocks.append({
+            "object": "block",
+            "type": "paragraph",
+            "paragraph": {"rich_text": _md_inline_to_rich(para_text)},
+        })
+        i = j
+
+    return blocks
+
+
+async def create_campaign_page(
+    *,
+    parent_page_id: str,
+    title: str,
+    campaign_md: str,
+    scripts_list: list[dict[str, Any]],
+    brand_name: str,
+    api_key: str,
+) -> dict[str, Any]:
+    """Create a NEW child page under `parent_page_id` containing the campaign
+    strategy followed by the creator scripts in a single document.
+
+    Returns `{page_id, page_url, appended_block_count}`. Notion limits page-create
+    payloads to 100 children, so any overflow gets PATCHed in chunks afterwards.
+    """
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Notion-Version": NOTION_VERSION,
+        "Content-Type": "application/json",
+    }
+    parent = _format_page_id(parent_page_id)
+
+    # Build the unified block list: strategy first, then scripts.
+    blocks: list[dict] = []
+    ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+    blocks.append(_paragraph(_rich(f"Generated: {ts}", italic=True)))
+    blocks.append(_divider())
+    blocks.append(_heading(1, "Strategy"))
+    blocks.extend(markdown_to_notion_blocks(campaign_md))
+    if scripts_list:
+        blocks.append(_divider())
+        # _format_notion_blocks already prepends its own h1+divider, so feed
+        # it directly.
+        blocks.extend(_format_notion_blocks(
+            scripts_list, campaign_name="Creator scripts", brand_name=brand_name,
+        ))
+
+    page_title = f"{brand_name} | {title}"
+    initial = blocks[:NOTION_BLOCK_CHUNK]
+    overflow = blocks[NOTION_BLOCK_CHUNK:]
+
+    body: dict[str, Any] = {
+        "parent": {"page_id": parent},
+        "properties": {
+            "title": {"title": [{"type": "text", "text": {"content": page_title}}]},
+        },
+        "children": initial,
+    }
+
+    async with httpx.AsyncClient(
+        base_url=NOTION_API_BASE, timeout=30.0, headers=headers,
+    ) as client:
+        resp = await client.post("/pages", json=body)
+        try:
+            data = resp.json()
+        except Exception:
+            data = {"raw": resp.text}
+        if resp.status_code >= 400:
+            raise RuntimeError(f"Notion {resp.status_code} on /pages: {data}")
+        page_id = data.get("id") or ""
+        page_url = data.get("url") or (
+            f"https://www.notion.so/{page_id.replace('-', '')}" if page_id else ""
+        )
+        appended = len(initial)
+
+        if overflow and page_id:
+            for start in range(0, len(overflow), NOTION_BLOCK_CHUNK):
+                chunk = overflow[start:start + NOTION_BLOCK_CHUNK]
+                r = await client.patch(
+                    f"/blocks/{_format_page_id(page_id)}/children",
+                    json={"children": chunk},
+                )
+                try:
+                    rb = r.json()
+                except Exception:
+                    rb = {"raw": r.text}
+                if r.status_code >= 400:
+                    raise RuntimeError(
+                        f"Notion {r.status_code} on /blocks/{page_id}/children: {rb}"
+                    )
+                appended += len(rb.get("results") or [])
+
+    return {
+        "page_id": page_id,
+        "page_url": page_url,
+        "appended_block_count": appended,
+    }
+
+
 async def publish_to_notion(
     blocks: list[dict], *, page_id: str, api_key: str,
 ) -> dict[str, Any]:
@@ -448,8 +670,8 @@ async def propose_scripts_for_campaign(
         }
 
     api_key = os.environ.get("NOTION_API_KEY")
-    target_page = page_id or os.environ.get("NOTION_SCRIPTS_PAGE_ID")
-    if not api_key or not target_page:
+    parent_page_id = page_id or os.environ.get("NOTION_SCRIPTS_PAGE_ID")
+    if not api_key or not parent_page_id:
         return {
             "scripts": scripts,
             "notion": {
@@ -459,14 +681,15 @@ async def propose_scripts_for_campaign(
             "published": False,
         }
 
-    blocks = _format_notion_blocks(
-        scripts,
-        campaign_name=_campaign_name_from_md(campaign_markdown),
-        brand_name=brand_name,
-    )
+    campaign_name = _campaign_name_from_md(campaign_markdown)
     try:
-        notion_result = await publish_to_notion(
-            blocks, page_id=target_page, api_key=api_key,
+        notion_result = await create_campaign_page(
+            parent_page_id=parent_page_id,
+            title=campaign_name,
+            campaign_md=campaign_markdown,
+            scripts_list=scripts,
+            brand_name=brand_name,
+            api_key=api_key,
         )
     except Exception as exc:
         logger.warning("Notion publish failed: %s", exc)
@@ -487,7 +710,9 @@ __all__ = [
     "NOTION_API_BASE",
     "NOTION_VERSION",
     "SCRIPTS_SYSTEM_PROMPT",
+    "create_campaign_page",
     "generate_scripts",
+    "markdown_to_notion_blocks",
     "propose_scripts_for_campaign",
     "publish_to_notion",
 ]

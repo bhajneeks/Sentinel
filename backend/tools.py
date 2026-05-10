@@ -656,9 +656,11 @@ async def _create_marketing_campaign(
     if not brief:
         return "error: brief is required"
 
-    # Optional knobs — default off for the heavy ones so the call stays fast.
+    # Optional knobs — default off for social_pulse (heavy), but default ON
+    # for publish_scripts so every campaign produces a Notion page that
+    # Rachel can text back as a single link.
     include_social_pulse = bool(args.get("include_social_pulse"))
-    publish_scripts = bool(args.get("publish_scripts"))
+    publish_scripts = bool(args.get("publish_scripts", True))
     brand_name = (args.get("brand_name") or "Aroma Cloud").strip() or "Aroma Cloud"
 
     try:
@@ -677,14 +679,21 @@ async def _create_marketing_campaign(
     name_match = re.search(r"^#\s+Campaign:\s+(.+?)\s*$", md, flags=re.MULTILINE)
     campaign_name = (name_match.group(1).strip() if name_match else "(untitled)")[:120]
 
+    scripts_block = result.get("scripts") if isinstance(result.get("scripts"), dict) else {}
+    notion_block = scripts_block.get("notion") if isinstance(scripts_block, dict) else {}
+    notion_block = notion_block if isinstance(notion_block, dict) else {}
+
     summary = {
         "campaign_name": campaign_name,
         "extracted_query": result.get("extracted_query"),
         "saved_to": result.get("saved_to"),
         "subagents_run": list((result.get("subagents") or {}).keys()),
-        "scripts_published_to_notion": (
-            (result.get("scripts") or {}).get("published") if isinstance(result.get("scripts"), dict) else False
-        ),
+        # NEW: the URL to the Notion page containing campaign + scripts.
+        # Rachel MUST include this URL verbatim in her reply to the user.
+        "notion_page_url": notion_block.get("page_url"),
+        "notion_published": bool(scripts_block.get("published")),
+        "notion_skip_reason": notion_block.get("reason"),
+        "notion_error": notion_block.get("error"),
         "automation_status": (
             (result.get("automations") or {}).get("dm", {}).get("status")
             if isinstance(result.get("automations"), dict) else None
