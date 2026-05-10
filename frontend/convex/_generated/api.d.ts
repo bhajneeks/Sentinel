@@ -8,6 +8,7 @@
  * @module
  */
 
+import type * as campaignRuns from "../campaignRuns.js";
 import type * as mentions from "../mentions.js";
 import type * as runs from "../runs.js";
 import type * as screenshots from "../screenshots.js";
@@ -22,6 +23,7 @@ import type {
 } from "convex/server";
 
 declare const fullApi: ApiFromModules<{
+  campaignRuns: typeof campaignRuns;
   mentions: typeof mentions;
   runs: typeof runs;
   screenshots: typeof screenshots;
