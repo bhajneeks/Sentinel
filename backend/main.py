@@ -522,6 +522,60 @@ def reopen_conversation(participant: str):
     closed_participants.discard(participant)
 
 
+@app.post("/api/reset")
+async def reset_all_state() -> dict[str, Any]:
+    """Wipe ALL in-memory conversation context across every participant.
+
+    Stops every supervised browser, drops every stored message, clears
+    closed_participants and tools' active-run / active-company maps, and
+    flushes Convex's running scraperSessions. Returns a summary of what
+    was cleared. Idempotent.
+    """
+    import supervised_agent
+    import tools as _tools
+    import convex_client as cx
+
+    # Snapshot list of participants with active state, to close cleanly.
+    participants = (
+        set(supervised_agent._registry.keys())
+        | set(_tools._active_run_by_participant.keys())
+        | set(closed_participants)
+        | {m.participant for m in messages if m.participant}
+    )
+
+    closed_browsers = 0
+    for p in participants:
+        try:
+            closed_browsers += await supervised_agent.close_all_for_participant(p)
+        except Exception as exc:
+            logger.warning("reset close_all failed for %s: %s", p, exc)
+
+    purged_messages = len(messages)
+    messages.clear()
+    closed_participants.clear()
+    _tools._active_run_by_participant.clear()
+    _tools._active_company_by_participant.clear()
+
+    # Best-effort: also flush any Convex rows still flagged running
+    # (e.g. orphans from prior backend processes).
+    aborted = 0
+    try:
+        client = cx.get_client()
+        aborted = await asyncio.to_thread(
+            client.mutation, "sessions:abortAllRunning", {"reason": "manual reset"},
+        )
+        aborted = int(aborted) if aborted is not None else 0
+    except Exception as exc:
+        logger.warning("reset abortAllRunning failed: %s", exc)
+
+    return {
+        "browsersClosed": closed_browsers,
+        "messagesPurged": purged_messages,
+        "participantsCleared": len(participants),
+        "convexRowsAborted": aborted,
+    }
+
+
 @app.post("/api/agents/{participant}/stop")
 async def stop_agents(participant: str) -> dict[str, Any]:
     """Stop every supervised browser agent associated with this participant

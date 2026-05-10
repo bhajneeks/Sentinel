@@ -119,20 +119,27 @@ def _is_relevant(haystack: str, company: str) -> bool:
 # pages, profile pages, hashtag pages) get rejected — those would render
 # as broken links in iMessage.
 _URL_PERMALINK_PATTERNS: dict[ConvexPlatform, re.Pattern[str]] = {
+    # Modern LinkedIn activity URNs are 19 digits; the legacy /posts/<slug>
+    # form has the activity id embedded with at least 18-19 digits too.
     "linkedin": re.compile(
-        r"linkedin\.com/(posts/[^/?]+|feed/update/urn:li:activity:\d+)",
+        r"linkedin\.com/(?:posts/[A-Za-z0-9_\-]+activity-\d{17,20}[A-Za-z0-9_\-]*"
+        r"|feed/update/urn:li:activity:\d{17,20})",
         re.IGNORECASE,
     ),
+    # X/Twitter snowflake ids are 18-19 digits (since 2019 they're all 19).
+    # Reject anything outside 17-20 to drop fabricated short ids.
     "x": re.compile(
-        r"(?:^|//(?:www\.)?(?:x|twitter)\.com/)[A-Za-z0-9_]+/status/\d+",
+        r"//(?:www\.)?(?:x|twitter)\.com/[A-Za-z0-9_]{1,15}/status/\d{17,20}\b",
         re.IGNORECASE,
     ),
+    # Reddit ids are base-36 and 6-12 chars. Tighten to that range.
     "reddit": re.compile(
-        r"reddit\.com/r/[^/]+/comments/[A-Za-z0-9_]+",
+        r"reddit\.com/r/[A-Za-z0-9_]+/comments/[a-z0-9]{6,12}\b",
         re.IGNORECASE,
     ),
+    # TikTok video ids are 19 digits.
     "tiktok": re.compile(
-        r"tiktok\.com/@[^/]+/video/\d+",
+        r"tiktok\.com/@[A-Za-z0-9._]+/video/\d{18,20}\b",
         re.IGNORECASE,
     ),
 }
@@ -877,13 +884,29 @@ _OBSERVATION_TRAILER = (
     " - The url MUST start with https:// and be the COMPLETE absolute "
     "permalink to the individual post. Never a relative path (no leading "
     "'/'), never the search page, never a profile / hashtag / company page.\n"
-    " - For X/Twitter: https://x.com/<handle>/status/<numeric_id>\n"
-    " - For LinkedIn: https://www.linkedin.com/posts/<slug>  OR  "
-    "https://www.linkedin.com/feed/update/urn:li:activity:<numeric_id>\n"
-    " - For Reddit: https://www.reddit.com/r/<sub>/comments/<id>/<slug>\n"
-    " - For TikTok: https://www.tiktok.com/@<handle>/video/<numeric_id>\n"
-    " - If you cannot find / extract the absolute permalink for a post, "
-    "SKIP that post entirely. Do NOT emit FOUND with a partial or made-up URL.\n\n"
+    " - DO NOT construct URLs by combining the author's handle with a "
+    "guessed id. EXTRACT the URL directly from the post's permalink "
+    "element on the page:\n"
+    "     X/Twitter:  the timestamp text (e.g. '12m', '2h') is a link — "
+    "read the `href` of that anchor. The full URL has the shape "
+    "https://x.com/<handle>/status/<19-digit-numeric-id>.\n"
+    "     LinkedIn:   the relative-time text (e.g. '2h', '1d') is a link "
+    "to /posts/<slug>...activity-<digits> or "
+    "/feed/update/urn:li:activity:<digits> — copy that anchor's href.\n"
+    "     Reddit:     each post tile has a permalink anchor on its title; "
+    "copy that href (https://www.reddit.com/r/<sub>/comments/<base36-id>/...).\n"
+    "     TikTok:     when the player is open, the active video URL is "
+    "shown in the address bar — copy it (https://www.tiktok.com/@<handle>/video/<19-digit-id>).\n"
+    " - VERIFY the id portion is the right LENGTH (X status: 17-20 "
+    "digits; LinkedIn activity: 17-20 digits; TikTok video: 18-20 digits; "
+    "Reddit base36: 6-12 chars). If the id you have is shorter than the "
+    "minimum, you likely truncated or fabricated it — re-find it or SKIP.\n"
+    " - If the post is unavailable / deleted (e.g. X says 'Hmm... this "
+    "page doesn't exist' or 'nothing to see here'), it is NOT a valid "
+    "post — SKIP it.\n"
+    " - If you cannot find / extract the exact permalink href, SKIP the "
+    "post entirely. Do NOT emit FOUND with a partial, guessed, or "
+    "made-up URL.\n\n"
     "SUMMARY: describe what people THINK or FEEL (e.g. 'commenters worried "
     "about the new privacy policy', 'OP frustrated with rate limits', "
     "'praising the new feature'), NOT what happened ('the company "
